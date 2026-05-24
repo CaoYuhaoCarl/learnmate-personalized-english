@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360">
+  <rect width="900" height="360" fill="#fbfaf6"/>
+  <g stroke="#d8d2c2" stroke-width="1">
+    <line x1="70" y1="88" x2="830" y2="88"/>
+    <line x1="70" y1="148" x2="830" y2="148"/>
+    <line x1="70" y1="208" x2="830" y2="208"/>
+    <line x1="70" y1="268" x2="830" y2="268"/>
+  </g>
+  <g fill="#23395b" font-family="Bradley Hand, Comic Sans MS, cursive" font-size="34">
+    <text x="82" y="78">Last weekend I go to park.</text>
+    <text x="82" y="138">I see many peoples.</text>
+    <text x="82" y="198">It was very fun.</text>
+  </g>
+</svg>

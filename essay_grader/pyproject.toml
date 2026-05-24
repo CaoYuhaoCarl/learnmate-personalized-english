@@ -1,0 +1,9 @@
+[project]
+name = "essay-grader"
+version = "0.1.0"
+description = "ADK v2 workflow that grades handwritten student essays from ./essays/."
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk",
+    "pydantic>=2",
+]
