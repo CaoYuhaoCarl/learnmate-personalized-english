@@ -55,6 +55,7 @@ class DimensionScores(BaseModel):
 class EssayGrade(BaseModel):
   filename: str
   prompt_summary: str
+  transcription: str
   overall_score: int
   dimensions: DimensionScores
   strengths: list[str]
@@ -63,22 +64,26 @@ class EssayGrade(BaseModel):
 
 grader = Agent(
     name="grader",
-    model="gemini-2.5-flash",
+    model="gemini-flash-latest",
     instruction=(
         "You are an experienced writing teacher. The user message contains a"
         " filename label followed by a single image. The image shows, top to"
         " bottom, the printed essay prompt and the student's handwritten"
         " response.\n\n"
         "Read both. Return a structured grade.\n\n"
-        "Score each dimension 0-10:\n"
+        "Score each dimension 0-5:\n"
         "  content     - relevance to the prompt\n"
         "  structure   - coherence and organization\n"
         "  language    - accuracy and fluency\n"
         "  handwriting - legibility and presentation\n\n"
-        "overall_score is 0-100, weighted 40/25/25/10 across content / structure"
+        "overall_score is 0-20, weighted 8/5/5/2 across content / structure"
         " / language / handwriting, rounded to the nearest integer.\n\n"
         "prompt_summary: one sentence describing what the essay was meant to"
         " address.\n"
+        "transcription: the student's handwritten response transcribed"
+        " verbatim. Preserve their original words, line breaks, spelling, and"
+        " grammar — do NOT silently correct mistakes. Use \\n for line"
+        " breaks. Do not include the printed prompt at the top of the image.\n"
         "strengths: 1-3 short bullets.\n"
         "improvements: 1-3 actionable bullets.\n"
         "filename: copy the filename label from the user message verbatim."
@@ -184,13 +189,17 @@ def write_report(node_input: list[EssayGrade]):
     lines.append("")
     lines.append(f"### {g.filename}")
     lines.append(f"**Prompt:** {g.prompt_summary}")
-    lines.append(f"**Overall:** {g.overall_score}/100")
+    lines.append(f"**Overall:** {g.overall_score}/20")
     lines.append("**Strengths:**")
     for s in g.strengths:
       lines.append(f"- {s}")
     lines.append("**Improvements:**")
     for i in g.improvements:
       lines.append(f"- {i}")
+    lines.append("**Transcription:**")
+    lines.append("")
+    for trans_line in g.transcription.splitlines() or [g.transcription]:
+      lines.append(f"> {trans_line}")
 
   report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
   yield Event(message=f"Wrote report -> {report_path}")
