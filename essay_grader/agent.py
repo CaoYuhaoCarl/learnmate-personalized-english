@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 from pathlib import Path
 
 from google.adk import Agent
@@ -54,6 +55,7 @@ class DimensionScores(BaseModel):
 
 class EssayGrade(BaseModel):
   filename: str
+  student_name: str
   prompt_summary: str
   transcription: str
   overall_score: int
@@ -78,6 +80,10 @@ grader = Agent(
         "  handwriting - legibility and presentation\n\n"
         "overall_score is 0-20, weighted 8/5/5/2 across content / structure"
         " / language / handwriting, rounded to the nearest integer.\n\n"
+        "student_name: the student's name as written on the image, usually at"
+        " the top of the page or in a header/label area. Return only the name"
+        " itself — strip any label like \"Name:\" / \"姓名:\" / \"Student:\"."
+        " If you cannot find a name, return \"unknown\".\n"
         "prompt_summary: one sentence describing what the essay was meant to"
         " address.\n"
         "transcription: the student's handwritten response transcribed"
@@ -158,6 +164,13 @@ async def orchestrate(ctx: Context, node_input: list[dict[str, str]]):
   yield Event(output=grades)
 
 
+def _safe_name(name: str) -> str:
+  """Make a student name safe for use as a filename segment."""
+  s = (name or "").strip().replace(" ", "_")
+  s = re.sub(r'[/\\:*?"<>|]+', "", s)
+  return s or "unknown"
+
+
 def write_report(node_input: list[EssayGrade]):
   grades = node_input
   if not grades:
@@ -166,43 +179,55 @@ def write_report(node_input: list[EssayGrade]):
 
   ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
   REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-  report_path = REPORTS_DIR / f"{ts}.md"
 
-  lines: list[str] = [
-      f"# Essay Grading Report — {ts}",
-      "",
-      f"Graded {len(grades)} essays.",
-      "",
-      "## Summary",
-      "| Filename | Score | Content | Structure | Language | Handwriting |",
-      "| --- | --- | --- | --- | --- | --- |",
-  ]
+  by_student: dict[str, list[EssayGrade]] = {}
   for g in grades:
-    d = g.dimensions
-    lines.append(
-        f"| {g.filename} | {g.overall_score} | {d.content} |"
-        f" {d.structure} | {d.language} | {d.handwriting} |"
-    )
-  lines.append("")
-  lines.append("## Detailed Feedback")
-  for g in grades:
-    lines.append("")
-    lines.append(f"### {g.filename}")
-    lines.append(f"**Prompt:** {g.prompt_summary}")
-    lines.append(f"**Overall:** {g.overall_score}/20")
-    lines.append("**Strengths:**")
-    for s in g.strengths:
-      lines.append(f"- {s}")
-    lines.append("**Improvements:**")
-    for i in g.improvements:
-      lines.append(f"- {i}")
-    lines.append("**Transcription:**")
-    lines.append("")
-    for trans_line in g.transcription.splitlines() or [g.transcription]:
-      lines.append(f"> {trans_line}")
+    by_student.setdefault(g.student_name or "unknown", []).append(g)
 
-  report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-  yield Event(message=f"Wrote report -> {report_path}")
+  written: list[Path] = []
+  for student, student_grades in by_student.items():
+    report_path = REPORTS_DIR / f"{_safe_name(student)}_{ts}.md"
+
+    lines: list[str] = [
+        f"# Essay Grading Report — {student} — {ts}",
+        "",
+        f"Graded {len(student_grades)} essay(s) for {student}.",
+        "",
+        "## Summary",
+        "| Filename | Score | Content | Structure | Language | Handwriting |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for g in student_grades:
+      d = g.dimensions
+      lines.append(
+          f"| {g.filename} | {g.overall_score} | {d.content} |"
+          f" {d.structure} | {d.language} | {d.handwriting} |"
+      )
+    lines.append("")
+    lines.append("## Detailed Feedback")
+    for g in student_grades:
+      lines.append("")
+      lines.append(f"### {g.filename}")
+      lines.append(f"**Prompt:** {g.prompt_summary}")
+      lines.append(f"**Overall:** {g.overall_score}/20")
+      lines.append("**Strengths:**")
+      for s in g.strengths:
+        lines.append(f"- {s}")
+      lines.append("**Improvements:**")
+      for i in g.improvements:
+        lines.append(f"- {i}")
+      lines.append("**Transcription:**")
+      lines.append("")
+      for trans_line in g.transcription.splitlines() or [g.transcription]:
+        lines.append(f"> {trans_line}")
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    written.append(report_path)
+
+  summary = f"Wrote {len(written)} report(s):\n" + "\n".join(
+      f"- {p}" for p in written
+  )
+  yield Event(message=summary)
 
 
 root_agent = Workflow(
