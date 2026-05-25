@@ -1,11 +1,12 @@
-# Storyflow ADK Agents
+# LearnMate Personalized English
 
-Small Google ADK examples for workflow-style agents.
+Google ADK agents for personalized English learning workflows.
 
 ## Agents
 
 - `my_agent`: routes a message into bug, customer support, or logistics paths.
 - `hitl_agent`: extracts a refund request, analyzes the refund decision, and requests human approval for large approved refunds.
+- `essay_grader`: grades handwritten student essays from uploaded image files and writes aggregate reports.
 - `composition_correction_agent`: backend-only multi-agent workflow that accepts a handwriting image path, extracts OCR text, pauses for human OCR review, corrects the composition, scores it, and persists a structured correction record.
 
 ## Setup
@@ -34,7 +35,8 @@ Start ADK from the repository root:
 adk web
 ```
 
-Then choose `my_agent`, `hitl_agent`, or `composition_correction_agent` in the ADK web UI.
+Then choose `my_agent`, `hitl_agent`, `essay_grader`, or
+`composition_correction_agent` in the ADK web UI.
 
 Run the backend-only composition correction sample without OCR or model credentials:
 
