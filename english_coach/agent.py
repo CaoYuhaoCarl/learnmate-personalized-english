@@ -1,12 +1,12 @@
 """
 Workflow: produce English coaching feedback for handwritten writing submissions.
 
-Reads ./submissions/*.{jpg,jpeg,png}, sends each image to a Gemini evidence
+Reads ./input/*.{jpg,jpeg,png}, sends each image to a Gemini evidence
 extractor as inline multimodal Parts, scores each evidence record locally,
 and writes markdown reports to ./reports/.
 
 Composition (left-to-right execution order):
-    list_writing_submissions -> orchestrate -> write_report
+    list_writing_inputs -> orchestrate -> write_report
                        └─ ctx.run_node + asyncio.gather over grade_one ─┐
                                           grade_one -> extractor Agent ──┘
 
@@ -39,7 +39,7 @@ from google.genai import types
 from pydantic import BaseModel
 from pydantic import Field
 
-WRITING_INPUTS_DIR = Path(__file__).parent / "submissions"
+WRITING_INPUTS_DIR = Path(__file__).parent / "input"
 REPORTS_DIR = Path(__file__).parent / "reports"
 MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
@@ -168,8 +168,8 @@ extractor = Agent(
 )
 
 
-def list_writing_submissions(node_input: str) -> list[dict[str, str]]:
-  """Scan ./submissions/ for supported image files."""
+def list_writing_inputs(node_input: str) -> list[dict[str, str]]:
+  """Scan ./input/ for supported image files."""
   WRITING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
   feedback_language = _feedback_language_from_input(node_input)
   items: list[dict[str, str]] = []
@@ -297,18 +297,18 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
 @node(rerun_on_resume=True)
 async def orchestrate(ctx: Context, node_input: list[dict[str, str]]):
   """Fan out one grade_one sub-node per writing submission."""
-  submissions = node_input
-  if not submissions:
+  inputs = node_input
+  if not inputs:
     yield Event(
         message=f"No .jpg/.jpeg/.png files found in {WRITING_INPUTS_DIR}."
     )
     yield Event(output=[])
     return
 
-  yield Event(message=f"Dispatching {len(submissions)} coach task(s)...")
+  yield Event(message=f"Dispatching {len(inputs)} coach task(s)...")
   tasks = [
       ctx.run_node(grade_one, node_input=e, use_sub_branch=True)
-      for e in submissions
+      for e in inputs
   ]
   grades = await asyncio.gather(*tasks)
   yield Event(output=grades)
@@ -422,5 +422,5 @@ def write_report(node_input: list[EnglishCoachFeedback]):
 
 root_agent = Workflow(
     name="root_agent",
-    edges=[("START", list_writing_submissions, orchestrate, write_report)],
+    edges=[("START", list_writing_inputs, orchestrate, write_report)],
 )

@@ -30,14 +30,17 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     expected,
                 )
 
-    def test_list_writing_submissions_attaches_feedback_language_from_user_input(self):
+    def test_default_writing_inputs_dir_is_input(self):
+        self.assertEqual(coach_agent.WRITING_INPUTS_DIR.name, "input")
+
+    def test_list_writing_inputs_attaches_feedback_language_from_user_input(self):
         old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             coach_agent.WRITING_INPUTS_DIR = Path(tmpdir)
             try:
                 (Path(tmpdir) / "submission.png").write_bytes(b"fake image bytes")
 
-                items = coach_agent.list_writing_submissions(
+                items = coach_agent.list_writing_inputs(
                     "please use English feedback"
                 )
             finally:

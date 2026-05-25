@@ -40,7 +40,7 @@ adk web
 ```
 
 Then choose `english_coach` in the ADK web UI. Drop `.jpg`, `.jpeg`, or `.png`
-writing submission images into `english_coach/submissions/`, send any chat
+writing submission images into `english_coach/input/`, send any chat
 message, and the coach writes a markdown aggregate report under
 `english_coach/reports/`.
 

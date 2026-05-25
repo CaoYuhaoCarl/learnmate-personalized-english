@@ -1,7 +1,7 @@
 [project]
 name = "english-coach"
 version = "0.1.0"
-description = "ADK v2 workflow for English coaching feedback from ./submissions/."
+description = "ADK v2 workflow for English coaching feedback from ./input/."
 requires-python = ">=3.10"
 dependencies = [
     "google-adk",

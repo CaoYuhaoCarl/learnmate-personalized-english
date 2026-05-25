@@ -2,7 +2,7 @@
 
 ADK v2 workflow for English coaching feedback. The current workflow grades
 handwritten writing submissions. Drop `.jpg`, `.jpeg`, or `.png` files into
-`./submissions/` (each image shows the printed prompt above the student's
+`./input/` (each image shows the printed prompt above the student's
 handwritten response), then start the workflow and send any chat message. The
 coach fans out one Gemini call per image in parallel, returns structured
 `EnglishCoachFeedback` results, and writes markdown reports to `./reports/`.

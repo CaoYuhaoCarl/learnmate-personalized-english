@@ -37,5 +37,5 @@ tmp/
 temp/
 
 # English coach local inputs and generated reports
-english_coach/submissions/
+english_coach/input/
 english_coach/reports/
