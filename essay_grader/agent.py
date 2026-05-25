@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import re
 from pathlib import Path
 from typing import Literal
@@ -45,6 +46,37 @@ MIME_BY_SUFFIX = {
     ".jpeg": "image/jpeg",
     ".png": "image/png",
 }
+FeedbackLanguage = Literal["zh-Hans", "en", "ja", "ko"]
+DEFAULT_FEEDBACK_LANGUAGE: FeedbackLanguage = "zh-Hans"
+
+
+def _has_ascii_alias(text: str, aliases: tuple[str, ...]) -> bool:
+  for alias in aliases:
+    pattern = rf"(^|[^a-z0-9]){re.escape(alias)}([^a-z0-9]|$)"
+    if re.search(pattern, text):
+      return True
+  return False
+
+
+def _feedback_language_from_input(node_input: object) -> FeedbackLanguage:
+  text = str(node_input or "").lower()
+  if _has_ascii_alias(text, ("en", "eng", "english")) or any(
+      alias in text for alias in ("英文", "英语")
+  ):
+    return "en"
+  if _has_ascii_alias(text, ("ja", "jp", "japanese")) or any(
+      alias in text for alias in ("日文", "日语", "日本語", "日本语")
+  ):
+    return "ja"
+  if _has_ascii_alias(text, ("ko", "kr", "korean")) or any(
+      alias in text for alias in ("韩文", "韓文", "韩语", "韓語", "한국어")
+  ):
+    return "ko"
+  if _has_ascii_alias(
+      text, ("zh", "zh-cn", "zh-hans", "cn", "chinese")
+  ) or any(alias in text for alias in ("中文", "汉语", "漢語", "简体", "簡體")):
+    return "zh-Hans"
+  return DEFAULT_FEEDBACK_LANGUAGE
 
 
 class DimensionScores(BaseModel):
@@ -78,6 +110,7 @@ class EssayEvidence(BaseModel):
 class EssayGrade(BaseModel):
   filename: str
   student_name: str
+  feedback_language: FeedbackLanguage = DEFAULT_FEEDBACK_LANGUAGE
   prompt_summary: str
   transcription: str
   overall_score: float
@@ -120,6 +153,10 @@ extractor = Agent(
         " closing thought.\n"
         "handwriting_legibility: choose exactly one of excellent, clear,"
         " readable, hard_to_read, illegible.\n"
+        "The user message includes feedback_language as one of zh-Hans, en,"
+        " ja, or ko. Write prompt_summary, strengths, and improvements in"
+        " feedback_language. zh-Hans means Simplified Chinese, en means"
+        " English, ja means Japanese, and ko means Korean.\n"
         "strengths: 1-3 short bullets.\n"
         "improvements: 1-3 actionable bullets."
     ),
@@ -132,14 +169,20 @@ extractor = Agent(
 
 
 def list_essays(node_input: str) -> list[dict[str, str]]:
-  """Scan ./essays/ for supported image files. Chat input is ignored."""
+  """Scan ./essays/ for supported image files."""
   ESSAYS_DIR.mkdir(parents=True, exist_ok=True)
+  feedback_language = _feedback_language_from_input(node_input)
   items: list[dict[str, str]] = []
   for path in sorted(ESSAYS_DIR.iterdir()):
     mime = MIME_BY_SUFFIX.get(path.suffix.lower())
     if mime is None:
       continue
-    items.append({"path": str(path), "filename": path.name, "mime": mime})
+    items.append({
+        "path": str(path),
+        "filename": path.name,
+        "mime": mime,
+        "feedback_language": feedback_language,
+    })
   return items
 
 
@@ -214,6 +257,9 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
   path = node_input["path"]
   filename = node_input["filename"]
   mime = node_input["mime"]
+  feedback_language = _feedback_language_from_input(
+      node_input.get("feedback_language", DEFAULT_FEEDBACK_LANGUAGE)
+  )
   yield Event(message=f"Grading {filename} (attempt {ctx.attempt_count})...")
 
   data = Path(path).read_bytes()
@@ -221,7 +267,11 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
       role="user",
       parts=[
           types.Part.from_text(
-              text=f"filename: {filename}\nGrade the essay in this image."
+              text=(
+                  f"filename: {filename}\n"
+                  f"feedback_language: {feedback_language}\n"
+                  "Grade the essay in this image."
+              )
           ),
           types.Part.from_bytes(data=data, mime_type=mime),
       ],
@@ -233,6 +283,7 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
   grade = EssayGrade(
       filename=filename,
       student_name=evidence.student_name,
+      feedback_language=feedback_language,
       prompt_summary=evidence.prompt_summary,
       transcription=evidence.transcription,
       overall_score=_calculate_overall_score(dimensions),
@@ -270,6 +321,14 @@ def _safe_name(name: str) -> str:
   return s or "unknown"
 
 
+def _yaml_string(value: str) -> str:
+  return json.dumps(value, ensure_ascii=False)
+
+
+def _markdown_cell(value: object) -> str:
+  return str(value).replace("\n", "<br>").replace("|", "\\|")
+
+
 def write_report(node_input: list[EssayGrade]):
   grades = node_input
   if not grades:
@@ -288,39 +347,69 @@ def write_report(node_input: list[EssayGrade]):
   written: list[Path] = []
   for student, student_grades in by_student.items():
     report_path = REPORTS_DIR / f"{_safe_name(student)}_{file_ts}.md"
+    feedback_language = student_grades[0].feedback_language
 
     lines: list[str] = [
-        f"# Essay Grading Report — {student} — {display_ts}",
+        "---",
+        "schema_version: 1",
+        f"report_type: {_yaml_string('essay_grading')}",
+        f"student: {_yaml_string(student)}",
+        f"feedback_language: {_yaml_string(feedback_language)}",
+        f"generated_at: {_yaml_string(display_ts)}",
+        f"essay_count: {len(student_grades)}",
+        "---",
         "",
-        f"Graded {len(student_grades)} essay(s) for {student}.",
+        "# Essay Grading Report",
         "",
-        "## Summary",
-        "| Filename | Score | Content | Structure | Language | Handwriting |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "## Report Info",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Student | {_markdown_cell(student)} |",
+        f"| Feedback Language | {_markdown_cell(feedback_language)} |",
+        f"| Generated At | {_markdown_cell(display_ts)} |",
+        f"| Essay Count | {len(student_grades)} |",
+        "",
+        "## Score Summary",
+        "| Essay | Overall | Content | Structure | Language | Handwriting |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for g in student_grades:
       d = g.dimensions
       lines.append(
-          f"| {g.filename} | {g.overall_score:.1f} | {d.content} |"
-          f" {d.structure} | {d.language:.1f} | {d.handwriting} |"
+          f"| {_markdown_cell(g.filename)} | {g.overall_score:.1f}/20 |"
+          f" {d.content}/5 | {d.structure}/5 | {d.language:.1f}/5 |"
+          f" {d.handwriting}/5 |"
       )
     lines.append("")
-    lines.append("## Detailed Feedback")
-    for g in student_grades:
+    lines.append("## Essay Details")
+    for index, g in enumerate(student_grades, start=1):
+      d = g.dimensions
       lines.append("")
-      lines.append(f"### {g.filename}")
-      lines.append(f"**Prompt:** {g.prompt_summary}")
-      lines.append(f"**Overall:** {g.overall_score:.1f}/20")
-      lines.append("**Strengths:**")
+      lines.append(f"### {index}. {g.filename}")
+      lines.append("")
+      lines.append("#### Score Breakdown")
+      lines.append("| Overall | Content | Structure | Language | Handwriting |")
+      lines.append("| ---: | ---: | ---: | ---: | ---: |")
+      lines.append(
+          f"| {g.overall_score:.1f}/20 | {d.content}/5 | {d.structure}/5 |"
+          f" {d.language:.1f}/5 | {d.handwriting}/5 |"
+      )
+      lines.append("")
+      lines.append("#### Prompt")
+      lines.append(g.prompt_summary)
+      lines.append("")
+      lines.append("#### Strengths")
       for s in g.strengths:
         lines.append(f"- {s}")
-      lines.append("**Improvements:**")
+      lines.append("")
+      lines.append("#### Improvements")
       for i in g.improvements:
         lines.append(f"- {i}")
-      lines.append("**Transcription:**")
       lines.append("")
-      for trans_line in g.transcription.splitlines() or [g.transcription]:
-        lines.append(f"> {trans_line}")
+      lines.append("#### Transcription")
+      lines.append("```text")
+      lines.extend(g.transcription.splitlines() or [g.transcription])
+      lines.append("```")
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     written.append(report_path)
