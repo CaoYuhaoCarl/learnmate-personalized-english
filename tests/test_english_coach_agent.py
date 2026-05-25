@@ -3,12 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from essay_grader import agent as essay_agent
+from english_coach import agent as coach_agent
 
 
-class EssayGraderAgentTest(unittest.TestCase):
+class EnglishCoachAgentTest(unittest.TestCase):
     def test_extractor_output_schema_excludes_score_fields(self):
-        fields = set(essay_agent.extractor.output_schema.model_fields)
+        fields = set(coach_agent.extractor.output_schema.model_fields)
 
         self.assertNotIn("filename", fields)
         self.assertNotIn("overall_score", fields)
@@ -26,26 +26,28 @@ class EssayGraderAgentTest(unittest.TestCase):
         for user_input, expected in examples.items():
             with self.subTest(user_input=user_input):
                 self.assertEqual(
-                    essay_agent._feedback_language_from_input(user_input),
+                    coach_agent._feedback_language_from_input(user_input),
                     expected,
                 )
 
-    def test_list_essays_attaches_feedback_language_from_user_input(self):
-        old_essays_dir = essay_agent.ESSAYS_DIR
+    def test_list_writing_submissions_attaches_feedback_language_from_user_input(self):
+        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            essay_agent.ESSAYS_DIR = Path(tmpdir)
+            coach_agent.WRITING_INPUTS_DIR = Path(tmpdir)
             try:
-                (Path(tmpdir) / "essay.png").write_bytes(b"fake image bytes")
+                (Path(tmpdir) / "submission.png").write_bytes(b"fake image bytes")
 
-                items = essay_agent.list_essays("please use English feedback")
+                items = coach_agent.list_writing_submissions(
+                    "please use English feedback"
+                )
             finally:
-                essay_agent.ESSAYS_DIR = old_essays_dir
+                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["feedback_language"], "en")
 
     def test_score_from_evidence_is_deterministic(self):
-        evidence = essay_agent.EssayEvidence(
+        evidence = coach_agent.WritingEvidence(
             student_name="Suzy",
             prompt_summary="Write about whether AI helps daily life.",
             transcription="AI helps me study. It help me plan. AI makes me happy.",
@@ -60,13 +62,13 @@ class EssayGraderAgentTest(unittest.TestCase):
             improvements=["Fix grammar."],
         )
 
-        first = essay_agent._score_from_evidence(evidence)
-        second = essay_agent._score_from_evidence(evidence)
+        first = coach_agent._score_from_evidence(evidence)
+        second = coach_agent._score_from_evidence(evidence)
 
         self.assertEqual(first, second)
         self.assertEqual(
             first,
-            essay_agent.DimensionScores(
+            coach_agent.DimensionScores(
                 content=4,
                 structure=4,
                 language=4,
@@ -75,7 +77,7 @@ class EssayGraderAgentTest(unittest.TestCase):
         )
 
     def test_language_score_deducts_half_point_per_error(self):
-        evidence = essay_agent.EssayEvidence(
+        evidence = coach_agent.WritingEvidence(
             student_name="Eve",
             prompt_summary="Write about winter holiday plans.",
             transcription="I learn writting. It help me. I like writters.",
@@ -90,19 +92,19 @@ class EssayGraderAgentTest(unittest.TestCase):
             improvements=["Fix language errors."],
         )
 
-        score = essay_agent._score_from_evidence(evidence)
+        score = coach_agent._score_from_evidence(evidence)
 
         self.assertEqual(score.language, 3.5)
 
     def test_overall_score_sums_dimension_scores(self):
         examples = [
-            essay_agent.DimensionScores(
+            coach_agent.DimensionScores(
                 content=5,
                 structure=5,
                 language=2.5,
                 handwriting=4,
             ),
-            essay_agent.DimensionScores(
+            coach_agent.DimensionScores(
                 content=4,
                 structure=5,
                 language=3.5,
@@ -113,14 +115,14 @@ class EssayGraderAgentTest(unittest.TestCase):
         for dimensions in examples:
             with self.subTest(dimensions=dimensions):
                 self.assertEqual(
-                    essay_agent._calculate_overall_score(dimensions),
+                    coach_agent._calculate_overall_score(dimensions),
                     16.5,
                 )
 
     def test_grade_one_sets_filename_and_calculates_overall_score(self):
         async def run_grade_one():
             with tempfile.TemporaryDirectory() as tmpdir:
-                image_path = Path(tmpdir) / "essay.png"
+                image_path = Path(tmpdir) / "submission.png"
                 image_path.write_bytes(b"fake image bytes")
 
                 class FakeContext:
@@ -156,11 +158,11 @@ class EssayGraderAgentTest(unittest.TestCase):
                 fake_context = FakeContext()
                 events = [
                     event
-                    async for event in essay_agent.grade_one._func(
+                    async for event in coach_agent.grade_one._func(
                         fake_context,
                         {
                             "path": str(image_path),
-                            "filename": "essay.png",
+                            "filename": "submission.png",
                             "mime": "image/png",
                             "feedback_language": "ja",
                         },
@@ -170,10 +172,10 @@ class EssayGraderAgentTest(unittest.TestCase):
 
         events, model_prompt = asyncio.run(run_grade_one())
         grade = events[-1].output
-        self.assertEqual(grade.filename, "essay.png")
+        self.assertEqual(grade.filename, "submission.png")
         self.assertEqual(
             grade.dimensions,
-            essay_agent.DimensionScores(
+            coach_agent.DimensionScores(
                 content=4,
                 structure=4,
                 language=4,
@@ -185,13 +187,13 @@ class EssayGraderAgentTest(unittest.TestCase):
         self.assertIn("feedback_language: ja", model_prompt)
 
     def test_write_report_uses_structured_markdown_sections(self):
-        grade = essay_agent.EssayGrade(
+        grade = coach_agent.EnglishCoachFeedback(
             filename="IMG_3872.JPG",
             student_name="Eve",
             prompt_summary="Write about winter holiday plans.",
             transcription="First line\nSecond line with original errors.",
             overall_score=16.5,
-            dimensions=essay_agent.DimensionScores(
+            dimensions=coach_agent.DimensionScores(
                 content=5,
                 structure=5,
                 language=2.5,
@@ -201,30 +203,30 @@ class EssayGraderAgentTest(unittest.TestCase):
             improvements=["Fix spelling errors."],
         )
 
-        old_reports_dir = essay_agent.REPORTS_DIR
+        old_reports_dir = coach_agent.REPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            essay_agent.REPORTS_DIR = Path(tmpdir)
+            coach_agent.REPORTS_DIR = Path(tmpdir)
             try:
-                events = list(essay_agent.write_report([grade]))
+                events = list(coach_agent.write_report([grade]))
                 reports = list(Path(tmpdir).glob("Eve_*.md"))
                 self.assertEqual(len(reports), 1)
                 text = reports[0].read_text(encoding="utf-8")
             finally:
-                essay_agent.REPORTS_DIR = old_reports_dir
+                coach_agent.REPORTS_DIR = old_reports_dir
 
         self.assertEqual(len(events), 1)
         self.assertTrue(text.startswith("---\nschema_version: 1\n"))
-        self.assertIn('report_type: "essay_grading"\n', text)
+        self.assertIn('report_type: "english_coach_feedback"\n', text)
         self.assertIn('student: "Eve"\n', text)
         self.assertIn('feedback_language: "zh-Hans"\n', text)
-        self.assertIn("essay_count: 1\n---\n\n", text)
+        self.assertIn("submission_count: 1\n---\n\n", text)
         self.assertIn("| Feedback Language | zh-Hans |", text)
 
         expected_order = [
-            "# Essay Grading Report",
+            "# English Coach Feedback Report",
             "## Report Info",
             "## Score Summary",
-            "## Essay Details",
+            "## Submission Details",
             "### 1. IMG_3872.JPG",
             "#### Score Breakdown",
             "#### Prompt",

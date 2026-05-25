@@ -36,6 +36,6 @@ env/
 tmp/
 temp/
 
-# Essay grader local inputs and generated reports
-essay_grader/essays/
-essay_grader/reports/
+# English coach local inputs and generated reports
+english_coach/submissions/
+english_coach/reports/

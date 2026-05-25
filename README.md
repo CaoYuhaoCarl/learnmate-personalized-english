@@ -1,12 +1,12 @@
 # LearnMate Personalized English
 
 Google ADK agents for personalized English learning workflows. The primary
-maintained workflow is `essay_grader`.
+maintained workflow is `english_coach`.
 
 ## Primary Agent
 
-- `essay_grader`: grades handwritten student essays from uploaded image files
-  and writes aggregate reports.
+- `english_coach`: produces structured English coaching feedback from uploaded
+  writing submission images and writes aggregate reports.
 
 ## Example Agents
 
@@ -39,9 +39,10 @@ Start ADK from the repository root:
 adk web
 ```
 
-Then choose `essay_grader` in the ADK web UI. Drop `.jpg`, `.jpeg`, or `.png`
-essay images into `essay_grader/essays/`, send any chat message, and the grader
-writes a markdown aggregate report under `essay_grader/reports/`.
+Then choose `english_coach` in the ADK web UI. Drop `.jpg`, `.jpeg`, or `.png`
+writing submission images into `english_coach/submissions/`, send any chat
+message, and the coach writes a markdown aggregate report under
+`english_coach/reports/`.
 
 ## Test
 

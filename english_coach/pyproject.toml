@@ -1,7 +1,7 @@
 [project]
-name = "essay-grader"
+name = "english-coach"
 version = "0.1.0"
-description = "ADK v2 workflow that grades handwritten student essays from ./essays/."
+description = "ADK v2 workflow for English coaching feedback from ./submissions/."
 requires-python = ">=3.10"
 dependencies = [
     "google-adk",

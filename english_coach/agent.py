@@ -1,12 +1,12 @@
 """
-Workflow: grade handwritten student essays.
+Workflow: produce English coaching feedback for handwritten writing submissions.
 
-Reads ./essays/*.{jpg,jpeg,png}, sends each image to a Gemini evidence
+Reads ./submissions/*.{jpg,jpeg,png}, sends each image to a Gemini evidence
 extractor as inline multimodal Parts, scores each evidence record locally,
 and writes markdown reports to ./reports/.
 
 Composition (left-to-right execution order):
-    list_essays -> orchestrate -> write_report
+    list_writing_submissions -> orchestrate -> write_report
                        └─ ctx.run_node + asyncio.gather over grade_one ─┐
                                           grade_one -> extractor Agent ──┘
 
@@ -39,7 +39,7 @@ from google.genai import types
 from pydantic import BaseModel
 from pydantic import Field
 
-ESSAYS_DIR = Path(__file__).parent / "essays"
+WRITING_INPUTS_DIR = Path(__file__).parent / "submissions"
 REPORTS_DIR = Path(__file__).parent / "reports"
 MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
@@ -86,7 +86,7 @@ class DimensionScores(BaseModel):
   handwriting: int
 
 
-class EssayEvidence(BaseModel):
+class WritingEvidence(BaseModel):
   student_name: str
   prompt_summary: str
   transcription: str
@@ -107,7 +107,7 @@ class EssayEvidence(BaseModel):
   improvements: list[str]
 
 
-class EssayGrade(BaseModel):
+class EnglishCoachFeedback(BaseModel):
   filename: str
   student_name: str
   feedback_language: FeedbackLanguage = DEFAULT_FEEDBACK_LANGUAGE
@@ -125,7 +125,7 @@ extractor = Agent(
     instruction=(
         "You are an experienced writing teacher. The user message contains a"
         " filename label followed by a single image. The image shows, top to"
-        " bottom, the printed essay prompt and the student's handwritten"
+        " bottom, the printed writing prompt and the student's handwritten"
         " response.\n\n"
         "Read both. Extract stable grading evidence only. Do not assign"
         " scores.\n\n"
@@ -133,7 +133,7 @@ extractor = Agent(
         " the top of the page or in a header/label area. Return only the name"
         " itself — strip any label like \"Name:\" / \"姓名:\" / \"Student:\"."
         " If you cannot find a name, return \"unknown\".\n"
-        "prompt_summary: one sentence describing what the essay was meant to"
+        "prompt_summary: one sentence describing what the writing task was meant to"
         " address.\n"
         "transcription: the student's handwritten response transcribed"
         " verbatim. Preserve their original words, line breaks, spelling, and"
@@ -160,7 +160,7 @@ extractor = Agent(
         "strengths: 1-3 short bullets.\n"
         "improvements: 1-3 actionable bullets."
     ),
-    output_schema=EssayEvidence,
+    output_schema=WritingEvidence,
     generate_content_config=types.GenerateContentConfig(
         temperature=0,
         seed=0,
@@ -168,12 +168,12 @@ extractor = Agent(
 )
 
 
-def list_essays(node_input: str) -> list[dict[str, str]]:
-  """Scan ./essays/ for supported image files."""
-  ESSAYS_DIR.mkdir(parents=True, exist_ok=True)
+def list_writing_submissions(node_input: str) -> list[dict[str, str]]:
+  """Scan ./submissions/ for supported image files."""
+  WRITING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
   feedback_language = _feedback_language_from_input(node_input)
   items: list[dict[str, str]] = []
-  for path in sorted(ESSAYS_DIR.iterdir()):
+  for path in sorted(WRITING_INPUTS_DIR.iterdir()):
     mime = MIME_BY_SUFFIX.get(path.suffix.lower())
     if mime is None:
       continue
@@ -196,7 +196,7 @@ def _calculate_overall_score(dimensions: DimensionScores) -> float:
   return round(total, 1)
 
 
-def _score_from_evidence(evidence: EssayEvidence) -> DimensionScores:
+def _score_from_evidence(evidence: WritingEvidence) -> DimensionScores:
   total = evidence.required_points_total
   covered = min(evidence.required_points_covered, total)
   if total <= 0:
@@ -240,12 +240,12 @@ def _score_from_evidence(evidence: EssayEvidence) -> DimensionScores:
   )
 
 
-def _evidence_from_output(result) -> EssayEvidence:
-  if isinstance(result, EssayEvidence):
-    return EssayEvidence.model_validate(result.model_dump())
+def _evidence_from_output(result) -> WritingEvidence:
+  if isinstance(result, WritingEvidence):
+    return WritingEvidence.model_validate(result.model_dump())
   if isinstance(result, dict):
-    return EssayEvidence.model_validate(result)
-  return EssayEvidence.model_validate_json(result)
+    return WritingEvidence.model_validate(result)
+  return WritingEvidence.model_validate_json(result)
 
 
 @node(
@@ -253,7 +253,7 @@ def _evidence_from_output(result) -> EssayEvidence:
     rerun_on_resume=True,
 )
 async def grade_one(ctx: Context, node_input: dict[str, str]):
-  """Grade one essay image. Retries on LLM/parse failure."""
+  """Grade one writing submission image. Retries on LLM/parse failure."""
   path = node_input["path"]
   filename = node_input["filename"]
   mime = node_input["mime"]
@@ -270,7 +270,7 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
               text=(
                   f"filename: {filename}\n"
                   f"feedback_language: {feedback_language}\n"
-                  "Grade the essay in this image."
+                  "Grade the writing submission in this image."
               )
           ),
           types.Part.from_bytes(data=data, mime_type=mime),
@@ -280,7 +280,7 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
 
   evidence = _evidence_from_output(result)
   dimensions = _score_from_evidence(evidence)
-  grade = EssayGrade(
+  grade = EnglishCoachFeedback(
       filename=filename,
       student_name=evidence.student_name,
       feedback_language=feedback_language,
@@ -296,19 +296,19 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
 
 @node(rerun_on_resume=True)
 async def orchestrate(ctx: Context, node_input: list[dict[str, str]]):
-  """Fan out one grade_one sub-node per essay."""
-  essays = node_input
-  if not essays:
+  """Fan out one grade_one sub-node per writing submission."""
+  submissions = node_input
+  if not submissions:
     yield Event(
-        message=f"No .jpg/.jpeg/.png files found in {ESSAYS_DIR}."
+        message=f"No .jpg/.jpeg/.png files found in {WRITING_INPUTS_DIR}."
     )
     yield Event(output=[])
     return
 
-  yield Event(message=f"Dispatching {len(essays)} grader(s)...")
+  yield Event(message=f"Dispatching {len(submissions)} coach task(s)...")
   tasks = [
       ctx.run_node(grade_one, node_input=e, use_sub_branch=True)
-      for e in essays
+      for e in submissions
   ]
   grades = await asyncio.gather(*tasks)
   yield Event(output=grades)
@@ -329,7 +329,7 @@ def _markdown_cell(value: object) -> str:
   return str(value).replace("\n", "<br>").replace("|", "\\|")
 
 
-def write_report(node_input: list[EssayGrade]):
+def write_report(node_input: list[EnglishCoachFeedback]):
   grades = node_input
   if not grades:
     yield Event(message="Nothing graded; no report written.")
@@ -340,7 +340,7 @@ def write_report(node_input: list[EssayGrade]):
   display_ts = now.strftime("%Y-%m-%d %H:%M:%S")
   REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-  by_student: dict[str, list[EssayGrade]] = {}
+  by_student: dict[str, list[EnglishCoachFeedback]] = {}
   for g in grades:
     by_student.setdefault(g.student_name or "unknown", []).append(g)
 
@@ -352,14 +352,14 @@ def write_report(node_input: list[EssayGrade]):
     lines: list[str] = [
         "---",
         "schema_version: 1",
-        f"report_type: {_yaml_string('essay_grading')}",
+        f"report_type: {_yaml_string('english_coach_feedback')}",
         f"student: {_yaml_string(student)}",
         f"feedback_language: {_yaml_string(feedback_language)}",
         f"generated_at: {_yaml_string(display_ts)}",
-        f"essay_count: {len(student_grades)}",
+        f"submission_count: {len(student_grades)}",
         "---",
         "",
-        "# Essay Grading Report",
+        "# English Coach Feedback Report",
         "",
         "## Report Info",
         "| Field | Value |",
@@ -367,10 +367,10 @@ def write_report(node_input: list[EssayGrade]):
         f"| Student | {_markdown_cell(student)} |",
         f"| Feedback Language | {_markdown_cell(feedback_language)} |",
         f"| Generated At | {_markdown_cell(display_ts)} |",
-        f"| Essay Count | {len(student_grades)} |",
+        f"| Submission Count | {len(student_grades)} |",
         "",
         "## Score Summary",
-        "| Essay | Overall | Content | Structure | Language | Handwriting |",
+        "| Submission | Overall | Content | Structure | Language | Handwriting |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for g in student_grades:
@@ -381,7 +381,7 @@ def write_report(node_input: list[EssayGrade]):
           f" {d.handwriting}/5 |"
       )
     lines.append("")
-    lines.append("## Essay Details")
+    lines.append("## Submission Details")
     for index, g in enumerate(student_grades, start=1):
       d = g.dimensions
       lines.append("")
@@ -422,5 +422,5 @@ def write_report(node_input: list[EssayGrade]):
 
 root_agent = Workflow(
     name="root_agent",
-    edges=[("START", list_essays, orchestrate, write_report)],
+    edges=[("START", list_writing_submissions, orchestrate, write_report)],
 )
