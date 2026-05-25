@@ -1,14 +1,14 @@
 """
 Workflow: grade handwritten student essays.
 
-Reads ./essays/*.{jpg,jpeg,png}, sends each image to a Gemini grader as inline
-multimodal Parts, collects structured EssayGrade results in parallel, and
-writes a markdown aggregate to ./reports/<UTC-timestamp>.md.
+Reads ./essays/*.{jpg,jpeg,png}, sends each image to a Gemini evidence
+extractor as inline multimodal Parts, scores each evidence record locally,
+and writes markdown reports to ./reports/.
 
 Composition (left-to-right execution order):
     list_essays -> orchestrate -> write_report
                        └─ ctx.run_node + asyncio.gather over grade_one ─┐
-                                            grade_one -> grader Agent ──┘
+                                          grade_one -> extractor Agent ──┘
 
 From adk_kit:
     events/event_message.py      (multimodal Part input pattern)
@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import json
 import re
 from pathlib import Path
+from typing import Literal
 
 from google.adk import Agent
 from google.adk import Context
@@ -36,6 +36,7 @@ from google.adk.workflow import node
 from google.adk.workflow import RetryConfig
 from google.genai import types
 from pydantic import BaseModel
+from pydantic import Field
 
 ESSAYS_DIR = Path(__file__).parent / "essays"
 REPORTS_DIR = Path(__file__).parent / "reports"
@@ -53,6 +54,27 @@ class DimensionScores(BaseModel):
   handwriting: int
 
 
+class EssayEvidence(BaseModel):
+  student_name: str
+  prompt_summary: str
+  transcription: str
+  required_points_covered: int = Field(ge=0)
+  required_points_total: int = Field(ge=0)
+  grammar_errors: list[str]
+  spelling_errors: list[str]
+  has_clear_structure: bool
+  has_conclusion: bool
+  handwriting_legibility: Literal[
+      "excellent",
+      "clear",
+      "readable",
+      "hard_to_read",
+      "illegible",
+  ]
+  strengths: list[str]
+  improvements: list[str]
+
+
 class EssayGrade(BaseModel):
   filename: str
   student_name: str
@@ -64,22 +86,16 @@ class EssayGrade(BaseModel):
   improvements: list[str]
 
 
-grader = Agent(
-    name="grader",
+extractor = Agent(
+    name="extractor",
     model="gemini-flash-latest",
     instruction=(
         "You are an experienced writing teacher. The user message contains a"
         " filename label followed by a single image. The image shows, top to"
         " bottom, the printed essay prompt and the student's handwritten"
         " response.\n\n"
-        "Read both. Return a structured grade.\n\n"
-        "Score each dimension 0-5:\n"
-        "  content     - relevance to the prompt\n"
-        "  structure   - coherence and organization\n"
-        "  language    - accuracy and fluency\n"
-        "  handwriting - legibility and presentation\n\n"
-        "overall_score is 0-20, weighted 4/4/6/6 across content / structure"
-        " / language / handwriting, rounded to the nearest integer.\n\n"
+        "Read both. Extract stable grading evidence only. Do not assign"
+        " scores.\n\n"
         "student_name: the student's name as written on the image, usually at"
         " the top of the page or in a header/label area. Return only the name"
         " itself — strip any label like \"Name:\" / \"姓名:\" / \"Student:\"."
@@ -90,11 +106,28 @@ grader = Agent(
         " verbatim. Preserve their original words, line breaks, spelling, and"
         " grammar — do NOT silently correct mistakes. Use \\n for line"
         " breaks. Do not include the printed prompt at the top of the image.\n"
+        "required_points_total: count the distinct required content points in"
+        " the printed prompt.\n"
+        "required_points_covered: count how many of those required points the"
+        " student's response addresses, even if imperfectly.\n"
+        "grammar_errors: list distinct grammar errors found in the student's"
+        " response. Use short quoted snippets.\n"
+        "spelling_errors: list distinct spelling errors found in the student's"
+        " response. Use short quoted snippets.\n"
+        "has_clear_structure: true if the response has a clear logical order"
+        " or useful transitions.\n"
+        "has_conclusion: true if the response has a concluding sentence or"
+        " closing thought.\n"
+        "handwriting_legibility: choose exactly one of excellent, clear,"
+        " readable, hard_to_read, illegible.\n"
         "strengths: 1-3 short bullets.\n"
-        "improvements: 1-3 actionable bullets.\n"
-        "filename: copy the filename label from the user message verbatim."
+        "improvements: 1-3 actionable bullets."
     ),
-    output_schema=EssayGrade,
+    output_schema=EssayEvidence,
+    generate_content_config=types.GenerateContentConfig(
+        temperature=0,
+        seed=0,
+    ),
 )
 
 
@@ -108,6 +141,77 @@ def list_essays(node_input: str) -> list[dict[str, str]]:
       continue
     items.append({"path": str(path), "filename": path.name, "mime": mime})
   return items
+
+
+def _calculate_overall_score(dimensions: DimensionScores) -> int:
+  weighted = (
+      dimensions.content * 4
+      + dimensions.structure * 4
+      + dimensions.language * 6
+      + dimensions.handwriting * 6
+  ) / 5
+  return round(weighted)
+
+
+def _score_from_evidence(evidence: EssayEvidence) -> DimensionScores:
+  total = evidence.required_points_total
+  covered = min(evidence.required_points_covered, total)
+  if total <= 0:
+    content = 3
+  else:
+    ratio = covered / total
+    if ratio >= 1:
+      content = 5
+    elif ratio >= 2 / 3:
+      content = 4
+    elif ratio >= 1 / 3:
+      content = 3
+    elif covered > 0:
+      content = 2
+    else:
+      content = 1
+
+  structure = min(
+      5,
+      3 + int(evidence.has_clear_structure) + int(evidence.has_conclusion),
+  )
+
+  language_error_count = (
+      len(evidence.grammar_errors) + len(evidence.spelling_errors)
+  )
+  if language_error_count == 0:
+    language = 5
+  elif language_error_count <= 2:
+    language = 4
+  elif language_error_count <= 5:
+    language = 3
+  elif language_error_count <= 8:
+    language = 2
+  else:
+    language = 1
+
+  handwriting = {
+      "excellent": 5,
+      "clear": 4,
+      "readable": 3,
+      "hard_to_read": 2,
+      "illegible": 1,
+  }[evidence.handwriting_legibility]
+
+  return DimensionScores(
+      content=content,
+      structure=structure,
+      language=language,
+      handwriting=handwriting,
+  )
+
+
+def _evidence_from_output(result) -> EssayEvidence:
+  if isinstance(result, EssayEvidence):
+    return EssayEvidence.model_validate(result.model_dump())
+  if isinstance(result, dict):
+    return EssayEvidence.model_validate(result)
+  return EssayEvidence.model_validate_json(result)
 
 
 @node(
@@ -131,16 +235,20 @@ async def grade_one(ctx: Context, node_input: dict[str, str]):
           types.Part.from_bytes(data=data, mime_type=mime),
       ],
   )
-  result = await ctx.run_node(grader, node_input=content, use_sub_branch=True)
+  result = await ctx.run_node(extractor, node_input=content, use_sub_branch=True)
 
-  if isinstance(result, EssayGrade):
-    grade = result
-  elif isinstance(result, dict):
-    grade = EssayGrade(**result)
-  else:
-    grade = EssayGrade(**json.loads(result))
-  # Trust the loader for filename; the LLM might paraphrase it.
-  grade = grade.model_copy(update={"filename": filename})
+  evidence = _evidence_from_output(result)
+  dimensions = _score_from_evidence(evidence)
+  grade = EssayGrade(
+      filename=filename,
+      student_name=evidence.student_name,
+      prompt_summary=evidence.prompt_summary,
+      transcription=evidence.transcription,
+      overall_score=_calculate_overall_score(dimensions),
+      dimensions=dimensions,
+      strengths=evidence.strengths,
+      improvements=evidence.improvements,
+  )
   yield Event(output=grade)
 
 
@@ -177,7 +285,9 @@ def write_report(node_input: list[EssayGrade]):
     yield Event(message="Nothing graded; no report written.")
     return
 
-  ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+  now = datetime.datetime.now().astimezone()
+  file_ts = now.strftime("%Y-%m-%d_%H-%M-%S")
+  display_ts = now.strftime("%Y-%m-%d %H:%M:%S")
   REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
   by_student: dict[str, list[EssayGrade]] = {}
@@ -186,10 +296,10 @@ def write_report(node_input: list[EssayGrade]):
 
   written: list[Path] = []
   for student, student_grades in by_student.items():
-    report_path = REPORTS_DIR / f"{_safe_name(student)}_{ts}.md"
+    report_path = REPORTS_DIR / f"{_safe_name(student)}_{file_ts}.md"
 
     lines: list[str] = [
-        f"# Essay Grading Report — {student} — {ts}",
+        f"# Essay Grading Report — {student} — {display_ts}",
         "",
         f"Graded {len(student_grades)} essay(s) for {student}.",
         "",
