@@ -134,6 +134,13 @@ class EnglishCoachAgentTest(unittest.TestCase):
                                 "required_points_covered": 2,
                                 "required_points_total": 3,
                                 "grammar_errors": ["AI help me"],
+                                "grammar_error_fixes": [
+                                    {
+                                        "error": "AI help me",
+                                        "suggested_fix": "AI helps me",
+                                        "explanation": "Use helps with a singular subject.",
+                                    }
+                                ],
                                 "spelling_errors": [],
                                 "has_clear_structure": True,
                                 "has_conclusion": False,
@@ -168,6 +175,17 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(
             [need.skill_tag for need in result.learning_needs],
             ["grammar", "writing_improvement"],
+        )
+        self.assertEqual(result.learning_needs[0].suggested_fix, "AI helps me")
+        for need in result.learning_needs:
+            self.assertFalse(need.suggested_fix.startswith("Review and correct:"))
+        self.assertEqual(
+            result.learning_needs[0].explanation,
+            "Use helps with a singular subject.",
+        )
+        self.assertNotEqual(
+            result.learning_needs[1].evidence,
+            result.learning_needs[1].suggested_fix,
         )
 
     def test_process_one_input_routes_grammar_training_to_mistake_extractor(self):

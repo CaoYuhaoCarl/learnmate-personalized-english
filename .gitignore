@@ -37,5 +37,6 @@ tmp/
 temp/
 
 # English coach local inputs and generated reports
-english_coach/input/
+english_coach/input/*
+!english_coach/input/.gitignore
 english_coach/reports/
