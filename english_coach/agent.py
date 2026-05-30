@@ -104,6 +104,12 @@ class DimensionScores(BaseModel):
   handwriting: int
 
 
+class WritingIssueFix(BaseModel):
+  error: str
+  suggested_fix: str
+  explanation: str
+
+
 class WritingEvidence(BaseModel):
   student_name: str
   prompt_summary: str
@@ -111,7 +117,9 @@ class WritingEvidence(BaseModel):
   required_points_covered: int = Field(ge=0)
   required_points_total: int = Field(ge=0)
   grammar_errors: list[str]
+  grammar_error_fixes: list[WritingIssueFix] = Field(default_factory=list)
   spelling_errors: list[str]
+  spelling_error_fixes: list[WritingIssueFix] = Field(default_factory=list)
   has_clear_structure: bool
   has_conclusion: bool
   handwriting_legibility: Literal[
@@ -228,15 +236,24 @@ extractor = Agent(
         " addresses, even if imperfectly.\n"
         "grammar_errors: list distinct grammar errors in the response. Use"
         " short quoted snippets.\n"
+        "grammar_error_fixes: one item per grammar_errors entry. error must"
+        " exactly repeat the matching grammar_errors snippet. suggested_fix"
+        " must be the corrected wording only, not an instruction to review."
+        " explanation should briefly explain the correction.\n"
         "spelling_errors: list distinct spelling errors. Use short snippets.\n"
+        "spelling_error_fixes: one item per spelling_errors entry. error must"
+        " exactly repeat the matching spelling_errors snippet. suggested_fix"
+        " must be the correct spelling only, not an instruction to review."
+        " explanation should briefly explain the correction.\n"
         "has_clear_structure: true if the response has logical order or useful"
         " transitions.\n"
         "has_conclusion: true if it has a closing thought.\n"
         "handwriting_legibility: choose exactly one of excellent, clear,"
         " readable, hard_to_read, illegible.\n"
         "The user message includes feedback_language as one of zh-Hans, en,"
-        " ja, or ko. Write prompt_summary, strengths, and improvements in that"
-        " feedback_language.\n"
+        " ja, or ko. Write prompt_summary, strengths, improvements,"
+        " grammar_error_fixes.explanation, and spelling_error_fixes.explanation"
+        " in that feedback_language.\n"
         "strengths: 1-3 short bullets.\n"
         "improvements: 1-3 actionable bullets."
     ),
@@ -444,6 +461,44 @@ def _image_content(
   )
 
 
+def _issue_key(text: str) -> str:
+  cleaned = text.strip()
+  cleaned = cleaned.removeprefix("Review and correct:").strip()
+  cleaned = cleaned.strip("\"'“”")
+  return re.sub(r"\s+", " ", cleaned).casefold()
+
+
+def _is_same_issue_text(left: str, right: str) -> bool:
+  return _issue_key(left) == _issue_key(right)
+
+
+def _writing_issue_fix(
+    *,
+    error: str,
+    index: int,
+    fixes: list[WritingIssueFix],
+    fallback_suggested_fix: str,
+    fallback_explanation: str,
+) -> tuple[str, str]:
+  error_key = _issue_key(error)
+  candidate: WritingIssueFix | None = None
+  for fix in fixes:
+    if _issue_key(fix.error) == error_key:
+      candidate = fix
+      break
+  if candidate is None and index < len(fixes):
+    candidate = fixes[index]
+
+  if candidate is None:
+    return fallback_suggested_fix, fallback_explanation
+
+  suggested_fix = candidate.suggested_fix.strip()
+  explanation = candidate.explanation.strip() or fallback_explanation
+  if not suggested_fix or _is_same_issue_text(error, suggested_fix):
+    return fallback_suggested_fix, fallback_explanation
+  return suggested_fix, explanation
+
+
 def _writing_learning_needs(
     *,
     filename: str,
@@ -451,7 +506,14 @@ def _writing_learning_needs(
     evidence: WritingEvidence,
 ) -> list[LearningNeed]:
   needs: list[LearningNeed] = []
-  for error in evidence.grammar_errors:
+  for index, error in enumerate(evidence.grammar_errors):
+    suggested_fix, explanation = _writing_issue_fix(
+        error=error,
+        index=index,
+        fixes=evidence.grammar_error_fixes,
+        fallback_suggested_fix="Rewrite this snippet with correct grammar.",
+        fallback_explanation="Grammar error found in writing.",
+    )
     needs.append(
         LearningNeed(
             student_name=student_name,
@@ -459,11 +521,18 @@ def _writing_learning_needs(
             filename=filename,
             skill_tag="grammar",
             evidence=error,
-            suggested_fix=f"Review and correct: {error}",
-            explanation="Grammar error found in writing.",
+            suggested_fix=suggested_fix,
+            explanation=explanation,
         )
     )
-  for error in evidence.spelling_errors:
+  for index, error in enumerate(evidence.spelling_errors):
+    suggested_fix, explanation = _writing_issue_fix(
+        error=error,
+        index=index,
+        fixes=evidence.spelling_error_fixes,
+        fallback_suggested_fix="Use the correct spelling for this word.",
+        fallback_explanation="Spelling error found in writing.",
+    )
     needs.append(
         LearningNeed(
             student_name=student_name,
@@ -471,8 +540,8 @@ def _writing_learning_needs(
             filename=filename,
             skill_tag="spelling",
             evidence=error,
-            suggested_fix=f"Review and correct: {error}",
-            explanation="Spelling error found in writing.",
+            suggested_fix=suggested_fix,
+            explanation=explanation,
         )
     )
   for improvement in evidence.improvements:
@@ -482,7 +551,7 @@ def _writing_learning_needs(
             source_type="writing",
             filename=filename,
             skill_tag="writing_improvement",
-            evidence=improvement,
+            evidence="Broader improvement area from teacher feedback.",
             suggested_fix=improvement,
             explanation="Actionable writing improvement from teacher feedback.",
         )
