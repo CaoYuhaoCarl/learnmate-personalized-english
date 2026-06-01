@@ -57,6 +57,12 @@ MIME_BY_SUFFIX = {
 FeedbackLanguage = Literal["zh-Hans", "en", "ja", "ko"]
 InputRoute = Literal["writing", "grammar_training", "unsupported"]
 LearningSource = Literal["writing", "grammar_training"]
+WritingTrainingSkill = Literal[
+    "writing_structure",
+    "content_development",
+    "cohesion",
+    "vocabulary_precision",
+]
 DEFAULT_FEEDBACK_LANGUAGE: FeedbackLanguage = "zh-Hans"
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -110,6 +116,13 @@ class WritingIssueFix(BaseModel):
   explanation: str
 
 
+class WritingTrainingFocus(BaseModel):
+  skill_tag: WritingTrainingSkill
+  evidence: str
+  suggested_fix: str
+  explanation: str
+
+
 class WritingEvidence(BaseModel):
   student_name: str
   prompt_summary: str
@@ -131,6 +144,9 @@ class WritingEvidence(BaseModel):
   ]
   strengths: list[str]
   improvements: list[str]
+  writing_training_focuses: list[WritingTrainingFocus] = Field(
+      default_factory=list
+  )
 
 
 class EnglishCoachFeedback(BaseModel):
@@ -252,10 +268,24 @@ extractor = Agent(
         " readable, hard_to_read, illegible.\n"
         "The user message includes feedback_language as one of zh-Hans, en,"
         " ja, or ko. Write prompt_summary, strengths, improvements,"
-        " grammar_error_fixes.explanation, and spelling_error_fixes.explanation"
-        " in that feedback_language.\n"
+        " grammar_error_fixes.explanation, spelling_error_fixes.explanation,"
+        " writing_training_focuses.suggested_fix, and"
+        " writing_training_focuses.explanation in that feedback_language.\n"
         "strengths: 1-3 short bullets.\n"
-        "improvements: 1-3 actionable bullets."
+        "improvements: 1-3 actionable bullets for teacher feedback.\n"
+        "writing_training_focuses: 0-3 broader writing skill needs for future"
+        " personalized practice. Do not repeat any item already captured in"
+        " grammar_errors or spelling_errors. Use skill_tag exactly as one of"
+        " writing_structure, content_development, cohesion, or"
+        " vocabulary_precision. Use writing_structure for organization,"
+        " paragraphing, or conclusions; content_development for missing prompt"
+        " points, weak reasons, or thin examples; cohesion for transitions and"
+        " logical links; vocabulary_precision for word choice, collocation, or"
+        " naturalness that is not a spelling error or single grammar-form"
+        " correction. evidence should be a short quote or observation;"
+        " suggested_fix should be the practice focus; explanation should briefly"
+        " explain why it matters. If all improvements are only grammar or"
+        " spelling repeats, return an empty list."
     ),
     output_schema=WritingEvidence,
     generate_content_config=types.GenerateContentConfig(
@@ -544,16 +574,16 @@ def _writing_learning_needs(
             explanation=explanation,
         )
     )
-  for improvement in evidence.improvements:
+  for focus in evidence.writing_training_focuses:
     needs.append(
         LearningNeed(
             student_name=student_name,
             source_type="writing",
             filename=filename,
-            skill_tag="writing_improvement",
-            evidence="Broader improvement area from teacher feedback.",
-            suggested_fix=improvement,
-            explanation="Actionable writing improvement from teacher feedback.",
+            skill_tag=focus.skill_tag,
+            evidence=focus.evidence,
+            suggested_fix=focus.suggested_fix,
+            explanation=focus.explanation,
         )
     )
   return needs
