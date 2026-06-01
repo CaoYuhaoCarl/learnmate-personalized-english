@@ -107,6 +107,52 @@ class EnglishCoachAgentTest(unittest.TestCase):
             ),
         )
 
+    def test_writing_learning_needs_do_not_reuse_feedback_improvements(self):
+        evidence = coach_agent.WritingEvidence(
+            student_name="Suzy",
+            prompt_summary="Write about helpful AI.",
+            transcription="AI help me study. I like it.",
+            required_points_covered=1,
+            required_points_total=3,
+            grammar_errors=["AI help me"],
+            grammar_error_fixes=[
+                coach_agent.WritingIssueFix(
+                    error="AI help me",
+                    suggested_fix="AI helps me",
+                    explanation="Use helps with a singular subject.",
+                )
+            ],
+            spelling_errors=[],
+            has_clear_structure=True,
+            has_conclusion=False,
+            handwriting_legibility="clear",
+            strengths=["Clear main idea."],
+            improvements=["Use subject-verb agreement."],
+            writing_training_focuses=[
+                coach_agent.WritingTrainingFocus(
+                    skill_tag="content_development",
+                    evidence="The response gives only one brief idea.",
+                    suggested_fix="Add one reason and one concrete example.",
+                    explanation="Detailed support makes the response stronger.",
+                )
+            ],
+        )
+
+        needs = coach_agent._writing_learning_needs(
+            filename="Suzy_writing.png",
+            student_name="Suzy",
+            evidence=evidence,
+        )
+
+        self.assertEqual(
+            [need.skill_tag for need in needs],
+            ["grammar", "content_development"],
+        )
+        self.assertNotIn(
+            "Use subject-verb agreement.",
+            [need.suggested_fix for need in needs],
+        )
+
     def test_process_one_input_routes_writing_to_extractor(self):
         async def run_process_one():
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -147,6 +193,22 @@ class EnglishCoachAgentTest(unittest.TestCase):
                                 "handwriting_legibility": "clear",
                                 "strengths": ["Clear idea."],
                                 "improvements": ["Use subject-verb agreement."],
+                                "writing_training_focuses": [
+                                    {
+                                        "skill_tag": "content_development",
+                                        "evidence": (
+                                            "Only one brief idea is developed."
+                                        ),
+                                        "suggested_fix": (
+                                            "Add one reason and one example to"
+                                            " support the main idea."
+                                        ),
+                                        "explanation": (
+                                            "More support makes the paragraph"
+                                            " more complete."
+                                        ),
+                                    }
+                                ],
                             }
                         raise AssertionError(f"unexpected node: {node.name}")
 
@@ -174,7 +236,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(result.feedback.overall_score, 16.5)
         self.assertEqual(
             [need.skill_tag for need in result.learning_needs],
-            ["grammar", "writing_improvement"],
+            ["grammar", "content_development"],
         )
         self.assertEqual(result.learning_needs[0].suggested_fix, "AI helps me")
         for need in result.learning_needs:
@@ -274,10 +336,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     student_name="Suzy",
                     source_type="writing",
                     filename="Suzy_writing.png",
-                    skill_tag="writing_improvement",
-                    evidence="Use subject-verb agreement.",
-                    suggested_fix="Use subject-verb agreement.",
-                    explanation="Writing improvement item.",
+                    skill_tag="content_development",
+                    evidence="Only one example is used.",
+                    suggested_fix="Add one more concrete example.",
+                    explanation="Content development item.",
                 )
             ],
         )
