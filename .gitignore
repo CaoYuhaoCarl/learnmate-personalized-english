@@ -36,6 +36,9 @@ env/
 tmp/
 temp/
 
+# Frontend build output
+web/dist/
+
 # English coach local inputs and generated reports
 english_coach/input/*
 !english_coach/input/.gitignore
