@@ -812,8 +812,51 @@ def _yaml_string(value: str) -> str:
   return json.dumps(value, ensure_ascii=False)
 
 
-def _markdown_cell(value: object) -> str:
-  return str(value).replace("\n", "<br>").replace("|", "\\|")
+def _markdown_one_line(value: object) -> str:
+  return " ".join(str(value).splitlines()).strip() or "-"
+
+
+def _markdown_lines(value: object) -> list[str]:
+  text = str(value).strip()
+  return text.splitlines() if text else ["-"]
+
+
+def _append_markdown_text(lines: list[str], value: object) -> None:
+  lines.extend(_markdown_lines(value))
+
+
+def _append_bullet_text(lines: list[str], value: object) -> None:
+  value_lines = _markdown_lines(value)
+  lines.append(f"- {value_lines[0]}")
+  for continuation in value_lines[1:]:
+    lines.append(f"  {continuation}" if continuation else "  ")
+
+
+def _append_labeled_text(lines: list[str], label: str, value: object) -> None:
+  value_lines = _markdown_lines(value)
+  if len(value_lines) == 1:
+    lines.append(f"- **{label}:** {value_lines[0]}")
+    return
+
+  lines.append(f"- **{label}:**")
+  for line in value_lines:
+    lines.append(f"  {line}" if line else "  ")
+
+
+def _append_fenced_text(
+    lines: list[str],
+    value: object,
+    info_string: str = "text",
+) -> None:
+  text = str(value).rstrip("\n")
+  longest_backtick_run = max(
+      (len(match.group(0)) for match in re.finditer(r"`+", text)),
+      default=0,
+  )
+  fence = "`" * max(3, longest_backtick_run + 1)
+  lines.append(f"{fence}{info_string}")
+  lines.extend(text.splitlines() or [""])
+  lines.append(fence)
 
 
 def write_report(
@@ -864,30 +907,25 @@ def write_report(
         "# Student Learning Profile",
         "",
         "## Report Info",
-        "| Field | Value |",
-        "| --- | --- |",
-        f"| Student | {_markdown_cell(student)} |",
-        f"| Feedback Language | {_markdown_cell(profile.feedback_language)} |",
-        f"| Generated At | {_markdown_cell(display_ts)} |",
-        f"| Writing Submissions | {len(profile.feedback_items)} |",
-        f"| Grammar Trainings | {len(profile.grammar_trainings)} |",
-        f"| Learning Needs | {len(profile.learning_needs)} |",
-        f"| Training JSON | {_markdown_cell(training_path)} |",
-        "",
     ]
+    _append_labeled_text(lines, "Student", student)
+    _append_labeled_text(lines, "Feedback Language", profile.feedback_language)
+    _append_labeled_text(lines, "Generated At", display_ts)
+    _append_labeled_text(lines, "Writing Submissions", len(profile.feedback_items))
+    _append_labeled_text(lines, "Grammar Trainings", len(profile.grammar_trainings))
+    _append_labeled_text(lines, "Learning Needs", len(profile.learning_needs))
+    _append_labeled_text(lines, "Training JSON", training_path)
+    lines.append("")
 
     if profile.feedback_items:
-      lines.extend([
-          "## Score Summary",
-          "| Submission | Overall | Content | Structure | Language | Handwriting |",
-          "| --- | ---: | ---: | ---: | ---: | ---: |",
-      ])
+      lines.append("## Score Summary")
       for feedback in profile.feedback_items:
         d = feedback.dimensions
         lines.append(
-            f"| {_markdown_cell(feedback.filename)} | {feedback.overall_score:.1f}/20 |"
-            f" {d.content}/5 | {d.structure}/5 | {d.language:.1f}/5 |"
-            f" {d.handwriting}/5 |"
+            f"- **{_markdown_one_line(feedback.filename)}:**"
+            f" {feedback.overall_score:.1f}/20"
+            f" (Content: {d.content}/5; Structure: {d.structure}/5;"
+            f" Language: {d.language:.1f}/5; Handwriting: {d.handwriting}/5)"
         )
       lines.append("")
       lines.append("## Submission Details")
@@ -895,75 +933,59 @@ def write_report(
         d = feedback.dimensions
         lines.extend([
             "",
-            f"### {index}. {feedback.filename}",
+            f"### {index}. {_markdown_one_line(feedback.filename)}",
             "",
             "#### Score Breakdown",
-            "| Overall | Content | Structure | Language | Handwriting |",
-            "| ---: | ---: | ---: | ---: | ---: |",
-            (
-                f"| {feedback.overall_score:.1f}/20 | {d.content}/5 |"
-                f" {d.structure}/5 | {d.language:.1f}/5 | {d.handwriting}/5 |"
-            ),
-            "",
-            "#### Prompt",
-            feedback.prompt_summary,
-            "",
-            "#### Strengths",
         ])
+        _append_labeled_text(lines, "Overall", f"{feedback.overall_score:.1f}/20")
+        _append_labeled_text(lines, "Content", f"{d.content}/5")
+        _append_labeled_text(lines, "Structure", f"{d.structure}/5")
+        _append_labeled_text(lines, "Language", f"{d.language:.1f}/5")
+        _append_labeled_text(lines, "Handwriting", f"{d.handwriting}/5")
+        lines.extend(["", "#### Prompt"])
+        _append_markdown_text(lines, feedback.prompt_summary)
+        lines.extend(["", "#### Strengths"])
         for strength in feedback.strengths:
-          lines.append(f"- {strength}")
+          _append_bullet_text(lines, strength)
         lines.append("")
         lines.append("#### Improvements")
         for improvement in feedback.improvements:
-          lines.append(f"- {improvement}")
+          _append_bullet_text(lines, improvement)
         lines.extend([
             "",
             "#### Transcription",
-            "```text",
         ])
-        lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
-        lines.append("```")
+        _append_fenced_text(lines, feedback.transcription)
         lines.append("")
 
-    lines.extend([
-        "## Grammar Training Mistakes",
-        "| Skill | Original | Correct | Explanation |",
-        "| --- | --- | --- | --- |",
-    ])
+    lines.append("## Grammar Training Mistakes")
     grammar_rows = 0
     for training in profile.grammar_trainings:
       for mistake in training.mistakes:
         grammar_rows += 1
-        lines.append(
-            f"| {_markdown_cell(mistake.skill_tag)} |"
-            f" {_markdown_cell(mistake.original_answer)} |"
-            f" {_markdown_cell(mistake.correct_answer)} |"
-            f" {_markdown_cell(mistake.explanation)} |"
-        )
+        lines.append(f"### {grammar_rows}. {_markdown_one_line(mistake.skill_tag)}")
+        _append_labeled_text(lines, "Original", mistake.original_answer)
+        _append_labeled_text(lines, "Correct", mistake.correct_answer)
+        _append_labeled_text(lines, "Explanation", mistake.explanation)
+        lines.append("")
     if grammar_rows == 0:
-      lines.append("| - | - | - | - |")
-    lines.append("")
+      lines.extend(["- None", ""])
 
-    lines.extend([
-        "## Personalized Training Input",
-        "| Source | Skill | Evidence | Suggested Fix | Explanation |",
-        "| --- | --- | --- | --- | --- |",
-    ])
-    for need in profile.learning_needs:
-      lines.append(
-          f"| {_markdown_cell(need.source_type)} |"
-          f" {_markdown_cell(need.skill_tag)} |"
-          f" {_markdown_cell(need.evidence)} |"
-          f" {_markdown_cell(need.suggested_fix)} |"
-          f" {_markdown_cell(need.explanation)} |"
-      )
+    lines.append("## Personalized Training Input")
+    for index, need in enumerate(profile.learning_needs, start=1):
+      lines.append(f"### {index}. {_markdown_one_line(need.skill_tag)}")
+      _append_labeled_text(lines, "Source", need.source_type)
+      _append_labeled_text(lines, "Evidence", need.evidence)
+      _append_labeled_text(lines, "Suggested Fix", need.suggested_fix)
+      _append_labeled_text(lines, "Explanation", need.explanation)
+      lines.append("")
     if not profile.learning_needs:
-      lines.append("| - | - | - | - | - |")
+      lines.extend(["- None", ""])
 
     if profile.skipped:
       lines.extend(["", "## Skipped Images"])
       for skipped in profile.skipped:
-        lines.append(f"- {skipped}")
+        _append_bullet_text(lines, skipped)
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     written.extend([report_path, training_path])

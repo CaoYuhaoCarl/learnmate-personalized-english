@@ -446,6 +446,79 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(payload["student_name"], "Eve")
         self.assertEqual(payload["learning_needs"][0]["skill_tag"], "past_tense")
 
+    def test_write_report_uses_obsidian_friendly_markdown(self):
+        profile = coach_agent.StudentLearningProfile(
+            student_name="Eve",
+            feedback_language="en",
+            feedback_items=[
+                coach_agent.EnglishCoachFeedback(
+                    filename="Eve|draft.png",
+                    student_name="Eve",
+                    feedback_language="en",
+                    prompt_summary="Write about travel.\nInclude where | when.",
+                    transcription="I go travel.\nI visit Beijing.",
+                    overall_score=15.0,
+                    dimensions=coach_agent.DimensionScores(
+                        content=4,
+                        structure=4,
+                        language=3.0,
+                        handwriting=4,
+                    ),
+                    strengths=["Clear idea.\nUses a place name."],
+                    improvements=["Change go | travel to a natural phrase."],
+                )
+            ],
+            grammar_trainings=[
+                coach_agent.GrammarTrainingEvidence(
+                    student_name="Eve",
+                    mistakes=[
+                        coach_agent.GrammarTrainingMistake(
+                            skill_tag="past_tense",
+                            original_answer="I go | yesterday.",
+                            correct_answer="I went yesterday.",
+                            explanation="Past time needs past tense.\nUse went.",
+                        )
+                    ],
+                )
+            ],
+            learning_needs=[
+                coach_agent.LearningNeed(
+                    student_name="Eve",
+                    source_type="writing",
+                    filename="Eve|draft.png",
+                    skill_tag="vocabulary_precision",
+                    evidence="go | travel\nnot natural",
+                    suggested_fix="Use go traveling or take a trip.",
+                    explanation="A natural collocation is easier to read.",
+                )
+            ],
+            skipped=["bad|image.png: unsupported\nnot a writing page"],
+        )
+
+        old_reports_dir = coach_agent.REPORTS_DIR
+        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
+            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            try:
+                list(coach_agent.write_report([profile]))
+                report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
+                report_text = report.read_text(encoding="utf-8")
+            finally:
+                coach_agent.REPORTS_DIR = old_reports_dir
+                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+
+        self.assertNotIn("| ---", report_text)
+        self.assertNotIn("<br>", report_text)
+        self.assertIn("- **Student:** Eve", report_text)
+        self.assertIn("### 1. Eve|draft.png", report_text)
+        self.assertIn("Write about travel.\nInclude where | when.", report_text)
+        self.assertIn("- Clear idea.\n  Uses a place name.", report_text)
+        self.assertIn("### 1. past_tense", report_text)
+        self.assertIn("- **Explanation:**\n  Past time needs past tense.\n  Use went.", report_text)
+        self.assertIn("### 1. vocabulary_precision", report_text)
+        self.assertIn("- **Evidence:**\n  go | travel\n  not natural", report_text)
+
 
 if __name__ == "__main__":
     unittest.main()
