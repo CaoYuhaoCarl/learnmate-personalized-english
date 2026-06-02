@@ -127,6 +127,7 @@ class WritingEvidence(BaseModel):
   student_name: str
   prompt_summary: str
   transcription: str
+  model_essay: str = ""
   required_points_covered: int = Field(ge=0)
   required_points_total: int = Field(ge=0)
   grammar_errors: list[str]
@@ -155,6 +156,7 @@ class EnglishCoachFeedback(BaseModel):
   feedback_language: FeedbackLanguage = DEFAULT_FEEDBACK_LANGUAGE
   prompt_summary: str
   transcription: str
+  model_essay: str = Field(default="", exclude=True)
   overall_score: float
   dimensions: DimensionScores
   strengths: list[str]
@@ -246,6 +248,12 @@ extractor = Agent(
         " verbatim. Preserve their original words, line breaks, spelling, and"
         " grammar; do not silently correct mistakes. Use \\n for line breaks."
         " Do not include the printed prompt.\n"
+        "model_essay: an English high-scoring rewritten sample based on the"
+        " prompt and the student's transcription. Preserve the student's main"
+        " ideas when relevant, correct grammar and spelling, add missing"
+        " required points if needed, and keep it age-appropriate. Return only"
+        " the model essay text; do not include a title, bullets, or"
+        " explanation. Use \\n for paragraph breaks.\n"
         "required_points_total: count distinct required content points in the"
         " prompt.\n"
         "required_points_covered: count how many required points the response"
@@ -664,6 +672,7 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
         feedback_language=feedback_language,
         prompt_summary=evidence.prompt_summary,
         transcription=evidence.transcription,
+        model_essay=evidence.model_essay,
         overall_score=_calculate_overall_score(dimensions),
         dimensions=dimensions,
         strengths=evidence.strengths,
@@ -923,6 +932,15 @@ def write_report(
         ])
         lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
         lines.append("```")
+        model_essay = feedback.model_essay.strip()
+        if model_essay:
+          lines.extend([
+              "",
+              "#### 范文",
+              "```text",
+          ])
+          lines.extend(model_essay.splitlines() or [model_essay])
+          lines.append("```")
         lines.append("")
 
     lines.extend([

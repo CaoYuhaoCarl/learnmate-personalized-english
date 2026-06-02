@@ -11,6 +11,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
     def test_extractor_output_schema_excludes_score_fields(self):
         fields = set(coach_agent.extractor.output_schema.model_fields)
 
+        self.assertIn("model_essay", fields)
         self.assertNotIn("filename", fields)
         self.assertNotIn("overall_score", fields)
         self.assertNotIn("dimensions", fields)
@@ -177,6 +178,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
                                 "student_name": "Suzy",
                                 "prompt_summary": "Write about helpful AI.",
                                 "transcription": "AI help me study.",
+                                "model_essay": (
+                                    "AI helps me study when I have difficult"
+                                    " homework."
+                                ),
                                 "required_points_covered": 2,
                                 "required_points_total": 3,
                                 "grammar_errors": ["AI help me"],
@@ -233,6 +238,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(result.category, "writing")
         self.assertEqual(result.student_name, "Suzy")
         self.assertIsNotNone(result.feedback)
+        self.assertEqual(
+            result.feedback.model_essay,
+            "AI helps me study when I have difficult homework.",
+        )
         self.assertEqual(result.feedback.overall_score, 16.5)
         self.assertEqual(
             [need.skill_tag for need in result.learning_needs],
@@ -385,6 +394,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     feedback_language="zh-Hans",
                     prompt_summary="写寒假计划。",
                     transcription="I go travel.",
+                    model_essay=(
+                        "During the winter holiday, I will study every day and"
+                        " travel with my family."
+                    ),
                     overall_score=16.5,
                     dimensions=coach_agent.DimensionScores(
                         content=5,
@@ -441,9 +454,15 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertTrue(report_text.startswith("---\nschema_version: 2\n"))
         self.assertIn('report_type: "student_learning_profile"\n', report_text)
+        self.assertIn("#### 范文", report_text)
+        self.assertIn(
+            "During the winter holiday, I will study every day and travel with my family.",
+            report_text,
+        )
         self.assertIn("## Grammar Training Mistakes", report_text)
         self.assertIn("## Personalized Training Input", report_text)
         self.assertEqual(payload["student_name"], "Eve")
+        self.assertNotIn("model_essay", payload["feedback_items"][0])
         self.assertEqual(payload["learning_needs"][0]["skill_tag"], "past_tense")
 
 
