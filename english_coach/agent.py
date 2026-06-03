@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import html
 import json
 import re
 from pathlib import Path
@@ -822,33 +821,19 @@ def _yaml_string(value: str) -> str:
   return json.dumps(value, ensure_ascii=False)
 
 
-def _html_cell(value: object) -> str:
-  return html.escape(str(value), quote=False).replace("\n", "<br>")
+def _markdown_cell(value: object) -> str:
+  return str(value).replace("\n", "<br>").replace("|", "\\|")
 
 
-def _html_table(headers: list[str], rows: list[list[object]]) -> list[str]:
-  lines = [
-      "<table>",
-      "  <thead>",
-      "    <tr>",
+def _markdown_table(headers: list[str], rows: list[list[object]]) -> list[str]:
+  return [
+      f"| {' | '.join(_markdown_cell(header) for header in headers)} |",
+      f"| {' | '.join('---' for _ in headers)} |",
+      *[
+          f"| {' | '.join(_markdown_cell(cell) for cell in row)} |"
+          for row in rows
+      ],
   ]
-  for header in headers:
-    lines.append(f"      <th>{_html_cell(header)}</th>")
-  lines.extend([
-      "    </tr>",
-      "  </thead>",
-      "  <tbody>",
-  ])
-  for row in rows:
-    lines.append("    <tr>")
-    for cell in row:
-      lines.append(f"      <td>{_html_cell(cell)}</td>")
-    lines.append("    </tr>")
-  lines.extend([
-      "  </tbody>",
-      "</table>",
-  ])
-  return lines
 
 
 def write_report(
@@ -901,7 +886,7 @@ def write_report(
         "## Report Info",
         "",
     ]
-    lines.extend(_html_table(
+    lines.extend(_markdown_table(
         ["Field", "Value"],
         [
             ["Student", student],
@@ -931,7 +916,7 @@ def write_report(
             f"{d.language:.1f}/5",
             f"{d.handwriting}/5",
         ])
-      lines.extend(_html_table(
+      lines.extend(_markdown_table(
           ["Submission", "Overall", "Content", "Structure", "Language", "Handwriting"],
           score_rows,
       ))
@@ -946,7 +931,7 @@ def write_report(
             "#### Score Breakdown",
             "",
         ])
-        lines.extend(_html_table(
+        lines.extend(_markdown_table(
             ["Overall", "Content", "Structure", "Language", "Handwriting"],
             [[
                 f"{feedback.overall_score:.1f}/20",
@@ -1007,7 +992,7 @@ def write_report(
         ])
     if not grammar_rows:
       grammar_rows.append(["-", "-", "-", "-"])
-    lines.extend(_html_table(
+    lines.extend(_markdown_table(
         ["Skill", "Original", "Correct", "Explanation"],
         grammar_rows,
     ))
@@ -1028,7 +1013,7 @@ def write_report(
       ])
     if not need_rows:
       need_rows.append(["-", "-", "-", "-", "-"])
-    lines.extend(_html_table(
+    lines.extend(_markdown_table(
         ["Source", "Skill", "Evidence", "Suggested Fix", "Explanation"],
         need_rows,
     ))
