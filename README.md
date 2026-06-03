@@ -1,17 +1,9 @@
 # LearnMate Personalized English
 
-Google ADK agents for personalized English learning workflows. The primary
-maintained workflow is `english_coach`.
-
-## Primary Agent
-
-- `english_coach`: produces structured English coaching feedback from uploaded
-  writing submission images and writes aggregate reports.
-
-## Example Agents
-
-- `my_agent`: routes a message into bug, customer support, or logistics paths.
-- `hitl_agent`: extracts a refund request, analyzes the refund decision, and requests human approval for large approved refunds.
+Google ADK workflow for personalized English learning. The maintained agent is
+`english_coach`, which produces structured English coaching feedback from
+uploaded submission images, writes aggregate reports, and exports personalized
+training inputs.
 
 ## Setup
 
@@ -23,14 +15,6 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-If you run the example agents, copy their example environment files and add
-your local credentials:
-
-```bash
-cp my_agent/.env.example my_agent/.env
-cp hitl_agent/.env.example hitl_agent/.env
-```
-
 ## Run
 
 Start ADK from the repository root:
@@ -39,10 +23,11 @@ Start ADK from the repository root:
 adk web
 ```
 
-Then choose `english_coach` in the ADK web UI. Drop `.jpg`, `.jpeg`, or `.png`
-writing submission images into `english_coach/input/`, send any chat
-message, and the coach writes a markdown aggregate report under
-`english_coach/reports/`.
+Then choose `english_coach` in the ADK web UI. Drop `.jpg`, `.jpeg`, `.png`,
+`.webp`, `.heic`, or `.heif` submission images into `english_coach/input/`,
+send any chat message, and the coach writes markdown reports under
+`english_coach/reports/` plus training JSON under
+`english_coach/training_inputs/`.
 
 ## Test
 
