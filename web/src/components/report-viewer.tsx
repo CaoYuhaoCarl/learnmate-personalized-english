@@ -88,7 +88,7 @@ export function ReportViewer({ filename }: { filename: string | undefined }) {
         {/* Markdown body — skip the first H1/Report Info since we render them above */}
         <article className="prose-report mt-7">
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-            {stripIntro(body)}
+            {normalizeGeneratedTables(stripIntro(body))}
           </ReactMarkdown>
         </article>
       </div>
@@ -102,4 +102,36 @@ function stripIntro(md: string): string {
   out = out.replace(/^\s*#\s+Student Learning Profile\s*\n+/m, "");
   out = out.replace(/^##\s+Report Info[\s\S]*?(?=^##\s+)/m, "");
   return out;
+}
+
+function normalizeGeneratedTables(md: string): string {
+  if (typeof DOMParser === "undefined") {
+    return md;
+  }
+
+  return md.replace(/<table>[\s\S]*?<\/table>/g, (tableHtml) => {
+    const doc = new DOMParser().parseFromString(tableHtml, "text/html");
+    const headers = Array.from(doc.querySelectorAll("thead th")).map((cell) =>
+      markdownTableCell(cell.textContent ?? ""),
+    );
+    const rows = Array.from(doc.querySelectorAll("tbody tr")).map((row) =>
+      Array.from(row.querySelectorAll("td")).map((cell) =>
+        markdownTableCell(cell.textContent ?? ""),
+      ),
+    );
+
+    if (headers.length === 0) {
+      return tableHtml;
+    }
+
+    return [
+      `| ${headers.join(" | ")} |`,
+      `| ${headers.map(() => "---").join(" | ")} |`,
+      ...rows.map((row) => `| ${row.join(" | ")} |`),
+    ].join("\n");
+  });
+}
+
+function markdownTableCell(value: string): string {
+  return value.trim().replace(/\|/g, "\\|").replace(/\n+/g, "<br>");
 }
