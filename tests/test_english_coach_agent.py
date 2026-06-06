@@ -3,8 +3,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from english_coach import agent as coach_agent
+from english_coach import pdf_export
 
 
 class EnglishCoachAgentTest(unittest.TestCase):
@@ -442,9 +444,21 @@ class EnglishCoachAgentTest(unittest.TestCase):
             coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
             coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
             try:
-                events = list(coach_agent.write_report([profile]))
+                def fake_export(report_path, output_dir):
+                    pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
+                    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                    pdf_path.write_bytes(b"%PDF-1.4\n")
+                    return pdf_path
+
+                with mock.patch.object(
+                    coach_agent,
+                    "export_report_pdf",
+                    side_effect=fake_export,
+                ) as export_mock:
+                    events = list(coach_agent.write_report([profile]))
                 report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
                 payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
+                pdf_path = next((coach_agent.REPORTS_DIR / "pdf_exports").glob("Eve_*.pdf"))
                 report_text = report.read_text(encoding="utf-8")
                 payload = json.loads(payload_path.read_text(encoding="utf-8"))
             finally:
@@ -452,6 +466,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 coach_agent.TRAINING_INPUTS_DIR = old_training_dir
 
         self.assertEqual(len(events), 1)
+        export_mock.assert_called_once()
         self.assertTrue(report_text.startswith("---\nschema_version: 2\n"))
         self.assertIn('report_type: "student_learning_profile"\n', report_text)
         self.assertIn("#### 范文", report_text)
@@ -464,6 +479,164 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(payload["student_name"], "Eve")
         self.assertNotIn("model_essay", payload["feedback_items"][0])
         self.assertEqual(payload["learning_needs"][0]["skill_tag"], "past_tense")
+        self.assertIn(str(pdf_path), events[0].message.parts[0].text)
+
+    def test_write_report_warns_when_pdf_export_fails(self):
+        profile = coach_agent.StudentLearningProfile(
+            student_name="Eve",
+            feedback_language="zh-Hans",
+            feedback_items=[],
+            grammar_trainings=[],
+            learning_needs=[],
+            skipped=[],
+        )
+
+        old_reports_dir = coach_agent.REPORTS_DIR
+        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
+            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            try:
+                with mock.patch.object(
+                    coach_agent,
+                    "export_report_pdf",
+                    side_effect=coach_agent.PdfExportError("pandoc missing"),
+                ):
+                    events = list(coach_agent.write_report([profile]))
+                report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
+                payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
+                report_exists = report.is_file()
+                payload_exists = payload_path.is_file()
+            finally:
+                coach_agent.REPORTS_DIR = old_reports_dir
+                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+
+        self.assertTrue(report_exists)
+        self.assertTrue(payload_exists)
+        self.assertIn("PDF export warning(s):", events[0].message.parts[0].text)
+        self.assertIn("pandoc missing", events[0].message.parts[0].text)
+
+    def test_reports_for_date_matches_markdown_reports_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reports_dir = Path(tmpdir)
+            today = reports_dir / "A_2026-06-06_09-00-00.md"
+            other_day = reports_dir / "A_2026-06-05_09-00-00.md"
+            pdf = reports_dir / "A_2026-06-06_09-00-00.pdf"
+            today.write_text("# A\n", encoding="utf-8")
+            other_day.write_text("# A\n", encoding="utf-8")
+            pdf.write_bytes(b"%PDF-1.4\n")
+
+            matches = pdf_export.reports_for_date("2026-06-06", reports_dir)
+
+        self.assertEqual(matches, [today])
+
+    def test_export_report_pdf_invokes_pandoc_with_print_options(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "Eve_2026-06-06_09-00-00.md"
+            css = root / "report_print.css"
+            output_dir = root / "pdf_exports"
+            markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
+            css.write_text("@page { size: A4; }\n", encoding="utf-8")
+
+            def fake_which(name):
+                return f"/tools/{name}"
+
+            def fake_run(command, **kwargs):
+                output_path = Path(command[command.index("-o") + 1])
+                output_path.write_bytes(b"%PDF-1.4\n")
+
+            with mock.patch.object(pdf_export.shutil, "which", side_effect=fake_which):
+                with mock.patch.object(
+                    pdf_export.subprocess,
+                    "run",
+                    side_effect=fake_run,
+                ) as run_mock:
+                    pdf_path = pdf_export.export_report_pdf(
+                        markdown,
+                        output_dir=output_dir,
+                        css_path=css,
+                    )
+                    output_dir_exists = output_dir.is_dir()
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(pdf_path, output_dir / "Eve_2026-06-06_09-00-00.pdf")
+        self.assertEqual(command[0], "/tools/pandoc")
+        self.assertIn(str(markdown), command)
+        self.assertIn(f"--css={css}", command)
+        self.assertIn("--pdf-engine", command)
+        self.assertIn("/tools/wkhtmltopdf", command)
+        self.assertIn("--pdf-engine-opt=--enable-local-file-access", command)
+        self.assertIn("--pdf-engine-opt=A4", command)
+        self.assertIn(str(pdf_path), command)
+        self.assertTrue(output_dir_exists)
+        self.assertTrue(run_mock.call_args.kwargs["check"])
+        self.assertTrue(run_mock.call_args.kwargs["capture_output"])
+        self.assertTrue(run_mock.call_args.kwargs["text"])
+
+    def test_export_report_pdf_reports_missing_tool(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "Eve_2026-06-06_09-00-00.md"
+            css = root / "report_print.css"
+            markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
+            css.write_text("@page { size: A4; }\n", encoding="utf-8")
+
+            def fake_which(name):
+                if name == "pandoc":
+                    return "/tools/pandoc"
+                return None
+
+            with mock.patch.object(pdf_export.shutil, "which", side_effect=fake_which):
+                with self.assertRaises(pdf_export.PdfExportError) as error:
+                    pdf_export.export_report_pdf(markdown, css_path=css)
+
+        self.assertIn("wkhtmltopdf", str(error.exception))
+
+    def test_export_report_pdf_reports_missing_output_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "Eve_2026-06-06_09-00-00.md"
+            css = root / "report_print.css"
+            output_dir = root / "pdf_exports"
+            markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
+            css.write_text("@page { size: A4; }\n", encoding="utf-8")
+
+            def fake_which(name):
+                return f"/tools/{name}"
+
+            with mock.patch.object(pdf_export.shutil, "which", side_effect=fake_which):
+                with mock.patch.object(pdf_export.subprocess, "run"):
+                    with self.assertRaises(pdf_export.PdfExportError) as error:
+                        pdf_export.export_report_pdf(
+                            markdown,
+                            output_dir=output_dir,
+                            css_path=css,
+                        )
+
+        self.assertIn("did not create output", str(error.exception))
+
+    def test_pdf_export_main_defaults_to_todays_reports(self):
+        report = Path("english_coach/reports/Eve_2026-06-06_09-00-00.md")
+        pdf_path = Path("english_coach/reports/pdf_exports/Eve_2026-06-06_09-00-00.pdf")
+        with mock.patch.object(pdf_export, "_default_date", return_value="2026-06-06"):
+            with mock.patch.object(
+                pdf_export,
+                "reports_for_date",
+                return_value=[report],
+            ) as reports_mock:
+                with mock.patch.object(
+                    pdf_export,
+                    "export_report_pdf",
+                    return_value=pdf_path,
+                ) as export_mock:
+                    with mock.patch("builtins.print") as print_mock:
+                        result = pdf_export.main([])
+
+        self.assertEqual(result, 0)
+        reports_mock.assert_called_once_with("2026-06-06")
+        export_mock.assert_called_once_with(report)
+        print_mock.assert_called_once_with(pdf_path)
 
 
 if __name__ == "__main__":
