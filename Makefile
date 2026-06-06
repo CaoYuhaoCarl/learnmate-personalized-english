@@ -1,4 +1,6 @@
-.PHONY: dev backend frontend adk sidecar
+.PHONY: dev backend frontend adk sidecar pdf
+
+DATE ?= $(shell date +%F)
 
 # Start all three services (ADK API, sidecar, Vite) with one Ctrl-C to kill all.
 dev:
@@ -23,3 +25,6 @@ sidecar:
 
 frontend:
 	cd web && pnpm dev
+
+pdf:
+	python3 -m english_coach.pdf_export --date "$(DATE)"

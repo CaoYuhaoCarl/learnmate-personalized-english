@@ -42,6 +42,9 @@ from google.genai import types
 from pydantic import BaseModel
 from pydantic import Field
 
+from .pdf_export import PdfExportError
+from .pdf_export import export_report_pdf
+
 WRITING_INPUTS_DIR = Path(__file__).parent / "input"
 REPORTS_DIR = Path(__file__).parent / "reports"
 TRAINING_INPUTS_DIR = Path(__file__).parent / "training_inputs"
@@ -842,6 +845,7 @@ def write_report(
   TRAINING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
   written: list[Path] = []
+  pdf_warnings: list[str] = []
   for profile in profiles:
     student = profile.student_name or "unknown"
     safe_student = _safe_name(student)
@@ -877,7 +881,7 @@ def write_report(
         "| --- | --- |",
         f"| Student | {_markdown_cell(student)} |",
         f"| Feedback Language | {_markdown_cell(profile.feedback_language)} |",
-        f"| Generated At | {_markdown_cell(display_ts)} |",
+        f"| Feedback At | {_markdown_cell(display_ts)} |",
         f"| Writing Submissions | {len(profile.feedback_items)} |",
         f"| Grammar Trainings | {len(profile.grammar_trainings)} |",
         f"| Learning Needs | {len(profile.learning_needs)} |",
@@ -985,10 +989,20 @@ def write_report(
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     written.extend([report_path, training_path])
+    try:
+      pdf_path = export_report_pdf(report_path, output_dir=REPORTS_DIR / "pdf_exports")
+    except PdfExportError as exc:
+      pdf_warnings.append(f"{report_path.name}: {exc}")
+    else:
+      written.append(pdf_path)
 
   summary = f"Wrote {len(written)} file(s):\n" + "\n".join(
       f"- {path}" for path in written
   )
+  if pdf_warnings:
+    summary += "\n\nPDF export warning(s):\n" + "\n".join(
+        f"- {warning}" for warning in pdf_warnings
+    )
   yield Event(message=summary)
 
 

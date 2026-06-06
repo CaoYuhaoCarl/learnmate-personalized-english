@@ -1,0 +1,112 @@
+@page {
+  size: A4;
+  margin: 16mm 14mm;
+}
+
+html {
+  color: #1f2933;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+body {
+  margin: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: #102a43;
+  line-height: 1.25;
+  margin: 1.1em 0 0.45em;
+  page-break-after: avoid;
+}
+
+h1 {
+  border-bottom: 2px solid #bcccdc;
+  font-size: 24px;
+  margin-top: 0;
+  padding-bottom: 8px;
+}
+
+h2 {
+  border-bottom: 1px solid #d9e2ec;
+  font-size: 18px;
+  padding-bottom: 5px;
+}
+
+h3 {
+  font-size: 15px;
+}
+
+h4 {
+  font-size: 13px;
+}
+
+p {
+  margin: 0.55em 0;
+}
+
+ul,
+ol {
+  margin: 0.4em 0 0.8em 1.5em;
+  padding: 0;
+}
+
+li {
+  margin: 0.2em 0;
+}
+
+table {
+  border-collapse: collapse;
+  margin: 0.45em 0 1em;
+  table-layout: fixed;
+  width: 100%;
+}
+
+th,
+td {
+  border: 1px solid #d9e2ec;
+  padding: 5px 6px;
+  vertical-align: top;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+th {
+  background: #f0f4f8;
+  color: #102a43;
+  font-weight: 700;
+}
+
+pre,
+code {
+  font-family: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+pre {
+  background: #f8fafc;
+  border: 1px solid #d9e2ec;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 0.55em 0 1em;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+blockquote {
+  border-left: 3px solid #9fb3c8;
+  color: #52606d;
+  margin: 0.8em 0;
+  padding-left: 0.9em;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid #d9e2ec;
+  margin: 1.2em 0;
+}
