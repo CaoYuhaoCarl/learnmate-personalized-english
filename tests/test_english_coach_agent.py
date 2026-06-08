@@ -615,6 +615,15 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertTrue(report_text.startswith("---\nschema_version: 2\n"))
         self.assertIn('report_type: "student_learning_profile"\n', report_text)
         self.assertIn("#### 范文", report_text)
+        self.assertIn("#### 题目", report_text)
+        self.assertIn("#### 优点", report_text)
+        self.assertIn("#### 改进建议", report_text)
+        self.assertIn("\n#### 原文\n```text\n", report_text)
+        self.assertNotIn("#### Prompt", report_text)
+        self.assertNotIn("#### Strengths", report_text)
+        self.assertNotIn("#### Improvements", report_text)
+        self.assertNotIn("#### 原文转录", report_text)
+        self.assertNotIn("#### Transcription", report_text)
         self.assertIn(
             "During the winter holiday, I will study every day and travel with my family.",
             report_text,

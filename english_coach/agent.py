@@ -1117,20 +1117,20 @@ def write_report(
                 f" {d.structure}/5 | {d.language:.1f}/5 | {d.handwriting}/5 |"
             ),
             "",
-            "#### Prompt",
+            "#### 题目",
             feedback.prompt_summary,
             "",
-            "#### Strengths",
+            "#### 优点",
         ])
         for strength in feedback.strengths:
           lines.append(f"- {strength}")
         lines.append("")
-        lines.append("#### Improvements")
+        lines.append("#### 改进建议")
         for improvement in feedback.improvements:
           lines.append(f"- {improvement}")
         lines.extend([
             "",
-            "#### Transcription",
+            "#### 原文",
             "```text",
         ])
         lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
