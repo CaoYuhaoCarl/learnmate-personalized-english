@@ -16,9 +16,15 @@ Usage: from the *parent* directory of this folder, run `adk web` and pick
 of the cwd, and the directory name must be a valid Python identifier — that's
 why it's `english_coach`, not `english-coach`.)
 
+PDF export requires `pandoc` and `wkhtmltopdf` to be installed on the computer.
+On macOS, install `pandoc` with `brew install pandoc`, then install
+`wkhtmltopdf` from <https://wkhtmltopdf.org/downloads.html>. From the repository
+root, run `make check-tools` to confirm both commands are available.
+
 Manual PDF export from the repository root:
 
 ```bash
+make check-tools
 make pdf
 make pdf DATE=2026-06-06
 python3 -m english_coach.pdf_export english_coach/reports/Cindy_2026-06-05_20-06-53.md
