@@ -15,6 +15,19 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
+PDF export also needs two system command-line tools:
+
+```bash
+brew install pandoc
+```
+
+Install `wkhtmltopdf` from the macOS package at
+<https://wkhtmltopdf.org/downloads.html>, then verify both tools are available:
+
+```bash
+make check-tools
+```
+
 ## Run
 
 Start ADK from the repository root:
@@ -37,6 +50,7 @@ available.
 Manual export uses the same print stylesheet as the automatic workflow:
 
 ```bash
+make check-tools
 make pdf
 make pdf DATE=2026-06-06
 python3 -m english_coach.pdf_export english_coach/reports/Cindy_2026-06-05_20-06-53.md
