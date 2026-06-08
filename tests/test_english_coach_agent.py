@@ -66,6 +66,65 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(items[0]["feedback_language"], "en")
         self.assertEqual(items[4]["mime"], "image/heic")
 
+    def test_list_writing_inputs_also_scans_tem_staging_dir(self):
+        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tem = root / "tem"
+            tem.mkdir()
+            (root / "top.jpg").write_bytes(b"fake image bytes")
+            (tem / "staged.png").write_bytes(b"fake image bytes")
+            (tem / "ignore.txt").write_text("nope", encoding="utf-8")
+
+            coach_agent.WRITING_INPUTS_DIR = root
+            try:
+                items = coach_agent.list_writing_inputs("")
+            finally:
+                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+
+        self.assertEqual(
+            [Path(item["path"]).name for item in items],
+            ["top.jpg", "staged.png"],
+        )
+        self.assertEqual([item["filename"] for item in items], ["top.jpg", "staged.png"])
+
+    def test_submission_date_normalization_and_priority(self):
+        self.assertEqual(
+            coach_agent._normalize_submission_date("Date: 2026.6.6"),
+            "2026-06-06",
+        )
+        self.assertEqual(
+            coach_agent._normalize_submission_date("2026/06/07"),
+            "2026-06-07",
+        )
+        self.assertEqual(coach_agent._normalize_submission_date("2026-13-07"), "")
+        with mock.patch.object(
+            coach_agent,
+            "_default_submission_date",
+            return_value="2026-06-08",
+        ):
+            self.assertEqual(
+                coach_agent._resolve_submission_date(
+                    evidence_date="2026.6.6",
+                    category_date="2026/6/5",
+                ),
+                "2026-06-06",
+            )
+            self.assertEqual(
+                coach_agent._resolve_submission_date(
+                    evidence_date="",
+                    category_date="2026/6/5",
+                ),
+                "2026-06-05",
+            )
+            self.assertEqual(
+                coach_agent._resolve_submission_date(
+                    evidence_date="missing",
+                    category_date="missing",
+                ),
+                "2026-06-08",
+            )
+
     def test_pick_input_route_emits_classifier_category(self):
         routes = list(
             coach_agent.pick_input_route(
@@ -172,12 +231,14 @@ class EnglishCoachAgentTest(unittest.TestCase):
                             return {
                                 "category": "writing",
                                 "student_name": "Suzy",
+                                "submission_date": "2026/6/5",
                                 "confidence": 0.94,
                                 "reason": "Handwritten writing response.",
                             }
                         if node.name == "extractor":
                             return {
                                 "student_name": "Suzy",
+                                "submission_date": "2026.6.6",
                                 "prompt_summary": "Write about helpful AI.",
                                 "transcription": "AI help me study.",
                                 "model_essay": (
@@ -239,6 +300,8 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(node_names, ["classify_input_image", "extractor"])
         self.assertEqual(result.category, "writing")
         self.assertEqual(result.student_name, "Suzy")
+        self.assertEqual(result.submission_date, "2026-06-06")
+        self.assertTrue(result.source_path.endswith("Suzy_writing.png"))
         self.assertIsNotNone(result.feedback)
         self.assertEqual(
             result.feedback.model_essay,
@@ -277,6 +340,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                             return {
                                 "category": "grammar_training",
                                 "student_name": "Suzy",
+                                "submission_date": "2026/6/6",
                                 "confidence": 0.96,
                                 "reason": "Grammar correction worksheet.",
                             }
@@ -314,10 +378,91 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(node_names, ["classify_input_image", "grammar_training_extractor"])
         self.assertEqual(result.category, "grammar_training")
         self.assertEqual(result.student_name, "Suzy")
+        self.assertEqual(result.submission_date, "2026-06-06")
         self.assertIsNone(result.feedback)
         self.assertEqual(len(result.grammar_training.mistakes), 1)
+        self.assertEqual(result.grammar_training.submission_date, "2026-06-06")
         self.assertEqual(result.learning_needs[0].source_type, "grammar_training")
         self.assertEqual(result.learning_needs[0].suggested_fix, "He goes to school.")
+
+    def test_rename_processed_inputs_updates_nested_filenames_and_avoids_collision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "IMG_1001.JPG"
+            source.write_bytes(b"fake image bytes")
+            existing = root / "Suzy_2026-06-06.JPG"
+            existing.write_bytes(b"existing image bytes")
+            result = coach_agent.InputProcessingResult(
+                filename=source.name,
+                source_path=str(source),
+                category="writing",
+                student_name="Suzy",
+                submission_date="2026.6.6",
+                feedback_language="en",
+                feedback=coach_agent.EnglishCoachFeedback(
+                    filename=source.name,
+                    student_name="Suzy",
+                    feedback_language="en",
+                    prompt_summary="Write about AI.",
+                    transcription="AI help me.",
+                    overall_score=17.0,
+                    dimensions=coach_agent.DimensionScores(
+                        content=4,
+                        structure=4,
+                        language=5.0,
+                        handwriting=4,
+                    ),
+                    strengths=["Clear point."],
+                    improvements=["Use subject-verb agreement."],
+                ),
+                learning_needs=[
+                    coach_agent.LearningNeed(
+                        student_name="Suzy",
+                        source_type="writing",
+                        filename=source.name,
+                        skill_tag="grammar",
+                        evidence="AI help me",
+                        suggested_fix="AI helps me",
+                        explanation="Use helps with a singular subject.",
+                    )
+                ],
+            )
+
+            events = list(coach_agent.rename_processed_inputs([result]))
+            output = events[-1].output[0]
+            renamed_path = root / "Suzy_2026-06-06_2.JPG"
+
+            self.assertFalse(source.exists())
+            self.assertTrue(existing.exists())
+            self.assertTrue(renamed_path.exists())
+            self.assertEqual(output.filename, renamed_path.name)
+            self.assertEqual(output.source_path, str(renamed_path))
+            self.assertEqual(output.feedback.filename, renamed_path.name)
+            self.assertEqual(output.learning_needs[0].filename, renamed_path.name)
+            self.assertIn(
+                "IMG_1001.JPG -> Suzy_2026-06-06_2.JPG",
+                events[0].message.parts[0].text,
+            )
+
+    def test_rename_processed_inputs_skips_unknown_student(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "IMG_1001.JPG"
+            source.write_bytes(b"fake image bytes")
+            result = coach_agent.InputProcessingResult(
+                filename=source.name,
+                source_path=str(source),
+                category="unsupported",
+                student_name="unknown",
+                submission_date="2026-06-06",
+                skipped_reason="Unreadable.",
+            )
+
+            events = list(coach_agent.rename_processed_inputs([result]))
+            output = events[-1].output[0]
+
+            self.assertTrue(source.exists())
+            self.assertEqual(output.filename, source.name)
+            self.assertEqual(len(events), 1)
 
     def test_build_student_profiles_merges_writing_and_grammar_learning_needs(self):
         writing_result = coach_agent.InputProcessingResult(
