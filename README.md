@@ -24,8 +24,9 @@ adk web
 ```
 
 Then choose `english_coach` in the ADK web UI. Drop `.jpg`, `.jpeg`, `.png`,
-`.webp`, `.heic`, or `.heif` submission images into `english_coach/input/`,
-send any chat message, and the coach writes markdown reports under
+`.webp`, `.heic`, or `.heif` submission images into `english_coach/input/` or
+`english_coach/input/tem/`, send any chat message, and the coach renames
+recognized inputs as `Student_YYYY-MM-DD.ext`, writes markdown reports under
 `english_coach/reports/` plus training JSON under
 `english_coach/training_inputs/`. PDF copies are exported automatically under
 `english_coach/reports/pdf_exports/` when `pandoc` and `wkhtmltopdf` are

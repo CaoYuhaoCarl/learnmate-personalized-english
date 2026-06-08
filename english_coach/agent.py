@@ -1,12 +1,14 @@
 """
 Workflow: produce English coaching feedback and training inputs from screenshots.
 
-Reads ./input/*.{jpg,jpeg,png,webp,heic,heif}, classifies each image, sends it
-to the matching Gemini structured extractor, merges all outputs into per-student
+Reads ./input/* and ./input/tem/* supported images, classifies each image,
+sends it to the matching Gemini structured extractor, renames each processed
+input from visible student/date evidence, merges all outputs into per-student
 learning profiles, and writes both Markdown reports and JSON training inputs.
 
 Composition:
-    list_writing_inputs -> orchestrate -> build_student_profiles -> write_report
+    list_writing_inputs -> orchestrate -> rename_processed_inputs
+        -> build_student_profiles -> write_report
                        └─ ctx.run_node + asyncio.gather over process_one_input
                             ├─ classify_input_image -> extractor
                             ├─ classify_input_image -> grammar_training_extractor
@@ -102,6 +104,7 @@ def _feedback_language_from_input(node_input: object) -> FeedbackLanguage:
 class ImageCategory(BaseModel):
   category: InputRoute
   student_name: str = "unknown"
+  submission_date: str = ""
   confidence: float = Field(ge=0, le=1)
   reason: str
 
@@ -128,6 +131,7 @@ class WritingTrainingFocus(BaseModel):
 
 class WritingEvidence(BaseModel):
   student_name: str
+  submission_date: str = ""
   prompt_summary: str
   transcription: str
   model_essay: str = ""
@@ -175,6 +179,7 @@ class GrammarTrainingMistake(BaseModel):
 
 class GrammarTrainingEvidence(BaseModel):
   student_name: str = "unknown"
+  submission_date: str = ""
   mistakes: list[GrammarTrainingMistake] = Field(default_factory=list)
 
 
@@ -190,8 +195,10 @@ class LearningNeed(BaseModel):
 
 class InputProcessingResult(BaseModel):
   filename: str
+  source_path: str = ""
   category: InputRoute
   student_name: str
+  submission_date: str = ""
   feedback_language: FeedbackLanguage = DEFAULT_FEEDBACK_LANGUAGE
   feedback: EnglishCoachFeedback | None = None
   grammar_training: GrammarTrainingEvidence | None = None
@@ -220,7 +227,10 @@ classify_input_image = Agent(
         " fill-in grammar answers, or visible grammar mistakes to review.\n"
         "- unsupported: anything else, unreadable images, or non-English work.\n\n"
         "student_name: return the student's name if visible, otherwise"
-        " \"unknown\". confidence: 0 to 1. reason: one short explanation."
+        " \"unknown\". submission_date: return the date visibly written or"
+        " printed on the image, normalized as YYYY-MM-DD when possible;"
+        " otherwise return an empty string. confidence: 0 to 1. reason: one"
+        " short explanation."
     ),
     output_schema=ImageCategory,
     output_key="image_category",
@@ -245,6 +255,9 @@ extractor = Agent(
         " the top of the page or in a header/label area. Return only the name"
         " itself; strip labels like \"Name:\" / \"姓名:\" / \"Student:\"."
         " If you cannot find a name, return \"unknown\".\n"
+        "submission_date: the date visibly written or printed on the image,"
+        " usually near the top/header. Return it normalized as YYYY-MM-DD when"
+        " possible. If no date is visible, return an empty string.\n"
         "prompt_summary: one sentence describing what the writing task was meant"
         " to address.\n"
         "transcription: the student's handwritten response transcribed"
@@ -316,6 +329,8 @@ grammar_training_extractor = Agent(
         " future personalized practice. Do not include correct answers with no"
         " error.\n\n"
         "student_name: the student's name if visible; otherwise \"unknown\".\n"
+        "submission_date: the date visibly written or printed on the image,"
+        " normalized as YYYY-MM-DD when possible; otherwise an empty string.\n"
         "mistakes: one item per distinct grammar error or wrong answer.\n"
         "skill_tag: short lowercase English label, such as tense,"
         " subject_verb_agreement, article, plural, preposition, word_order, or"
@@ -335,21 +350,30 @@ grammar_training_extractor = Agent(
 )
 
 
+def _writing_input_scan_dirs() -> list[Path]:
+  return [WRITING_INPUTS_DIR, WRITING_INPUTS_DIR / "tem"]
+
+
 def list_writing_inputs(node_input: str) -> list[dict[str, str]]:
-  """Scan ./input/ for supported image files."""
+  """Scan ./input/ and ./input/tem/ for supported image files."""
   WRITING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
   feedback_language = _feedback_language_from_input(node_input)
   items: list[dict[str, str]] = []
-  for path in sorted(WRITING_INPUTS_DIR.iterdir()):
-    mime = MIME_BY_SUFFIX.get(path.suffix.lower())
-    if mime is None:
+  for directory in _writing_input_scan_dirs():
+    if not directory.is_dir():
       continue
-    items.append({
-        "path": str(path),
-        "filename": path.name,
-        "mime": mime,
-        "feedback_language": feedback_language,
-    })
+    for path in sorted(directory.iterdir()):
+      if not path.is_file():
+        continue
+      mime = MIME_BY_SUFFIX.get(path.suffix.lower())
+      if mime is None:
+        continue
+      items.append({
+          "path": str(path),
+          "filename": path.name,
+          "mime": mime,
+          "feedback_language": feedback_language,
+      })
   return items
 
 
@@ -476,6 +500,74 @@ def _resolve_student_name(
   if _known_name(category_name):
     return category_name.strip()
   return _student_hint_from_filename(filename)
+
+
+def _normalize_submission_date(value: str | None) -> str:
+  text = (value or "").strip()
+  if not text:
+    return ""
+  match = re.search(
+      r"(?P<year>\d{4})\s*(?:[-./]|年)\s*"
+      r"(?P<month>\d{1,2})\s*(?:[-./]|月)\s*"
+      r"(?P<day>\d{1,2})",
+      text,
+  )
+  if not match:
+    return ""
+  try:
+    return datetime.date(
+        int(match.group("year")),
+        int(match.group("month")),
+        int(match.group("day")),
+    ).isoformat()
+  except ValueError:
+    return ""
+
+
+def _default_submission_date() -> str:
+  return datetime.datetime.now().astimezone().date().isoformat()
+
+
+def _resolve_submission_date(
+    *,
+    evidence_date: str | None,
+    category_date: str | None,
+) -> str:
+  return (
+      _normalize_submission_date(evidence_date)
+      or _normalize_submission_date(category_date)
+      or _default_submission_date()
+  )
+
+
+def _safe_input_student_segment(name: str) -> str:
+  segment = _safe_name(name)
+  segment = re.sub(r"^[._-]+|[._-]+$", "", segment)
+  return segment or "unknown"
+
+
+def _canonical_input_stem(student_name: str, submission_date: str) -> str:
+  return f"{_safe_input_student_segment(student_name)}_{submission_date}"
+
+
+def _unique_input_path(
+    *,
+    source_path: Path,
+    target_stem: str,
+) -> Path:
+  target_dir = source_path.parent
+  suffix = source_path.suffix
+  candidate = target_dir / f"{target_stem}{suffix}"
+  if candidate == source_path:
+    return source_path
+
+  index = 2
+  while candidate.exists():
+    if candidate == source_path:
+      return source_path
+    candidate = target_dir / f"{target_stem}_{index}{suffix}"
+    index += 1
+  return candidate
 
 
 def _image_content(
@@ -667,7 +759,13 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
         category_name=category.student_name,
         evidence_name=evidence.student_name,
     )
-    evidence = evidence.model_copy(update={"student_name": student_name})
+    submission_date = _resolve_submission_date(
+        evidence_date=evidence.submission_date,
+        category_date=category.submission_date,
+    )
+    evidence = evidence.model_copy(
+        update={"student_name": student_name, "submission_date": submission_date}
+    )
     dimensions = _score_from_evidence(evidence)
     feedback = EnglishCoachFeedback(
         filename=filename,
@@ -684,8 +782,10 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
     yield Event(
         output=InputProcessingResult(
             filename=filename,
+            source_path=path,
             category="writing",
             student_name=student_name,
+            submission_date=submission_date,
             feedback_language=feedback_language,
             feedback=feedback,
             learning_needs=_writing_learning_needs(
@@ -715,12 +815,20 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
         category_name=category.student_name,
         evidence_name=evidence.student_name,
     )
-    evidence = evidence.model_copy(update={"student_name": student_name})
+    submission_date = _resolve_submission_date(
+        evidence_date=evidence.submission_date,
+        category_date=category.submission_date,
+    )
+    evidence = evidence.model_copy(
+        update={"student_name": student_name, "submission_date": submission_date}
+    )
     yield Event(
         output=InputProcessingResult(
             filename=filename,
+            source_path=path,
             category="grammar_training",
             student_name=student_name,
+            submission_date=submission_date,
             feedback_language=feedback_language,
             grammar_training=evidence,
             learning_needs=_grammar_learning_needs(
@@ -736,11 +844,16 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
   yield Event(
       output=InputProcessingResult(
           filename=filename,
+          source_path=path,
           category="unsupported",
           student_name=_resolve_student_name(
               filename=filename,
               category_name=category.student_name,
               evidence_name="unknown",
+          ),
+          submission_date=_resolve_submission_date(
+              evidence_date="",
+              category_date=category.submission_date,
           ),
           feedback_language=feedback_language,
           skipped_reason=reason,
@@ -773,6 +886,92 @@ def _coerce_results(
     node_input: list[InputProcessingResult] | list[dict[str, object]],
 ) -> list[InputProcessingResult]:
   return [InputProcessingResult.model_validate(item) for item in node_input]
+
+
+def _result_with_filename(
+    *,
+    result: InputProcessingResult,
+    filename: str,
+    source_path: str,
+) -> InputProcessingResult:
+  feedback = result.feedback
+  if feedback is not None:
+    feedback = feedback.model_copy(update={"filename": filename})
+
+  learning_needs = [
+      need.model_copy(update={"filename": filename})
+      for need in result.learning_needs
+  ]
+
+  return result.model_copy(
+      update={
+          "filename": filename,
+          "source_path": source_path,
+          "feedback": feedback,
+          "learning_needs": learning_needs,
+      }
+  )
+
+
+def _rename_processed_input(
+    result: InputProcessingResult,
+) -> tuple[InputProcessingResult, str | None]:
+  if not _known_name(result.student_name):
+    return result, None
+
+  student_segment = _safe_input_student_segment(result.student_name)
+  if student_segment == "unknown":
+    return result, None
+
+  source_path = Path(result.source_path) if result.source_path else None
+  if source_path is None or not source_path.is_file():
+    return result, None
+
+  target_stem = _canonical_input_stem(
+      student_name=result.student_name,
+      submission_date=(
+          _normalize_submission_date(result.submission_date)
+          or _default_submission_date()
+      ),
+  )
+  target_path = _unique_input_path(
+      source_path=source_path,
+      target_stem=target_stem,
+  )
+
+  if target_path != source_path:
+    source_path.rename(target_path)
+    message = f"{source_path.name} -> {target_path.name}"
+  else:
+    message = None
+
+  return _result_with_filename(
+      result=result,
+      filename=target_path.name,
+      source_path=str(target_path),
+  ), message
+
+
+def rename_processed_inputs(
+    node_input: list[InputProcessingResult] | list[dict[str, object]],
+):
+  """Serially rename source images after parallel extraction has finished."""
+  results = _coerce_results(node_input)
+  renamed: list[str] = []
+  updated_results: list[InputProcessingResult] = []
+  for result in results:
+    updated, message = _rename_processed_input(result)
+    updated_results.append(updated)
+    if message:
+      renamed.append(message)
+
+  if renamed:
+    yield Event(
+        message="Renamed input file(s):\n" + "\n".join(
+            f"- {item}" for item in renamed
+        )
+    )
+  yield Event(output=updated_results)
 
 
 def build_student_profiles(
@@ -1009,6 +1208,13 @@ def write_report(
 root_agent = Workflow(
     name="root_agent",
     edges=[
-        ("START", list_writing_inputs, orchestrate, build_student_profiles, write_report),
+        (
+            "START",
+            list_writing_inputs,
+            orchestrate,
+            rename_processed_inputs,
+            build_student_profiles,
+            write_report,
+        ),
     ],
 )
