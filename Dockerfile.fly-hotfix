@@ -1,0 +1,5 @@
+FROM registry.fly.io/learnmate-english-coach-smoke:deployment-01KTKHMJNCCFPENJE6KBSC2BTE
+
+USER root
+COPY --chown=appuser:appuser english_coach/pdf_export.py /app/english_coach/pdf_export.py
+USER appuser

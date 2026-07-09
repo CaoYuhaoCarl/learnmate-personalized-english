@@ -1,10 +1,11 @@
 """
 Workflow: produce English coaching feedback and training inputs from screenshots.
 
-Reads ./input/* and ./input/tem/* supported images, classifies each image,
-sends it to the matching Gemini structured extractor, renames each processed
-input from visible student/date evidence, merges all outputs into per-student
-learning profiles, and writes both Markdown reports and JSON training inputs.
+Reads ADK Web uploaded images or ./input/* and ./input/tem/* supported images,
+classifies each image, sends it to the matching Gemini structured extractor,
+renames each processed input from visible student/date evidence, merges all
+outputs into per-student learning profiles, and writes both Markdown reports
+and JSON training inputs.
 
 Composition:
     list_writing_inputs -> orchestrate -> rename_processed_inputs
@@ -27,12 +28,14 @@ From adk_kit:
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
 import json
 import re
 from pathlib import Path
 from typing import Literal
 from typing import TypeVar
+from urllib.parse import quote
 
 from google.adk import Agent
 from google.adk import Context
@@ -45,7 +48,9 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from .pdf_export import PdfExportError
+from .pdf_export import PdfOpenError
 from .pdf_export import export_report_pdf
+from .pdf_export import open_pdf_in_wps
 
 WRITING_INPUTS_DIR = Path(__file__).parent / "input"
 REPORTS_DIR = Path(__file__).parent / "reports"
@@ -57,6 +62,13 @@ MIME_BY_SUFFIX = {
     ".webp": "image/webp",
     ".heic": "image/heic",
     ".heif": "image/heif",
+}
+SUFFIX_BY_MIME = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
 }
 
 FeedbackLanguage = Literal["zh-Hans", "en", "ja", "ko"]
@@ -72,6 +84,20 @@ DEFAULT_FEEDBACK_LANGUAGE: FeedbackLanguage = "zh-Hans"
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
+def _content_text(value: types.Content) -> str:
+  return "".join(
+      part.text
+      for part in value.parts or []
+      if part.text and not getattr(part, "thought", False)
+  )
+
+
+def _node_input_text(node_input: object) -> str:
+  if isinstance(node_input, types.Content):
+    return _content_text(node_input)
+  return str(node_input or "")
+
+
 def _has_ascii_alias(text: str, aliases: tuple[str, ...]) -> bool:
   for alias in aliases:
     pattern = rf"(^|[^a-z0-9]){re.escape(alias)}([^a-z0-9]|$)"
@@ -81,7 +107,7 @@ def _has_ascii_alias(text: str, aliases: tuple[str, ...]) -> bool:
 
 
 def _feedback_language_from_input(node_input: object) -> FeedbackLanguage:
-  text = str(node_input or "").lower()
+  text = _node_input_text(node_input).lower()
   if _has_ascii_alias(text, ("en", "eng", "english")) or any(
       alias in text for alias in ("英文", "英语")
   ):
@@ -237,6 +263,7 @@ classify_input_image = Agent(
     generate_content_config=types.GenerateContentConfig(
         temperature=0,
         seed=0,
+        max_output_tokens=4096,
     ),
 )
 
@@ -315,6 +342,9 @@ extractor = Agent(
     generate_content_config=types.GenerateContentConfig(
         temperature=0,
         seed=0,
+        # Caps runaway repetition loops; far above any legitimate essay
+        # transcription + model essay + fixes, which stay under ~4k tokens.
+        max_output_tokens=16384,
     ),
 )
 
@@ -346,6 +376,7 @@ grammar_training_extractor = Agent(
     generate_content_config=types.GenerateContentConfig(
         temperature=0,
         seed=0,
+        max_output_tokens=8192,
     ),
 )
 
@@ -354,10 +385,113 @@ def _writing_input_scan_dirs() -> list[Path]:
   return [WRITING_INPUTS_DIR, WRITING_INPUTS_DIR / "tem"]
 
 
-def list_writing_inputs(node_input: str) -> list[dict[str, str]]:
-  """Scan ./input/ and ./input/tem/ for supported image files."""
+def _uploaded_inputs_dir() -> Path:
+  return WRITING_INPUTS_DIR / "uploads"
+
+
+def _blob_bytes(data: object) -> bytes:
+  if data is None:
+    return b""
+  if isinstance(data, bytes):
+    return data
+  if isinstance(data, bytearray):
+    return bytes(data)
+  if isinstance(data, str):
+    return base64.b64decode(data)
+  return bytes(data)
+
+
+def _mime_for_inline_image(blob: types.Blob) -> str | None:
+  mime = (blob.mime_type or "").lower()
+  if mime in SUFFIX_BY_MIME:
+    return mime
+  suffix = Path(blob.display_name or "").suffix.lower()
+  return MIME_BY_SUFFIX.get(suffix)
+
+
+def _safe_upload_filename(
+    *,
+    display_name: str | None,
+    index: int,
+    mime: str,
+) -> str:
+  suffix = SUFFIX_BY_MIME.get(mime, ".png")
+  raw_name = Path(display_name or "").name.strip()
+  if not raw_name:
+    return f"uploaded_{index}{suffix}"
+
+  raw_name = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', "_", raw_name)
+  raw_path = Path(raw_name)
+  raw_suffix = raw_path.suffix.lower()
+  if raw_suffix in MIME_BY_SUFFIX:
+    suffix = raw_suffix
+
+  stem = raw_path.stem.strip(" ._-")
+  stem = re.sub(r"\s+", "_", stem)
+  stem = stem or f"uploaded_{index}"
+  return f"{stem}{suffix}"
+
+
+def _unique_upload_path(directory: Path, filename: str) -> Path:
+  candidate = directory / filename
+  if not candidate.exists():
+    return candidate
+
+  stem = Path(filename).stem
+  suffix = Path(filename).suffix
+  index = 2
+  while True:
+    candidate = directory / f"{stem}_{index}{suffix}"
+    if not candidate.exists():
+      return candidate
+    index += 1
+
+
+def _uploaded_inline_image_inputs(
+    node_input: object,
+    feedback_language: FeedbackLanguage,
+) -> list[dict[str, str]]:
+  if not isinstance(node_input, types.Content):
+    return []
+
+  items: list[dict[str, str]] = []
+  for index, part in enumerate(node_input.parts or [], start=1):
+    blob = part.inline_data
+    if blob is None:
+      continue
+    mime = _mime_for_inline_image(blob)
+    if mime is None:
+      continue
+    data = _blob_bytes(blob.data)
+    if not data:
+      continue
+
+    upload_dir = _uploaded_inputs_dir()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    filename = _safe_upload_filename(
+        display_name=blob.display_name,
+        index=index,
+        mime=mime,
+    )
+    path = _unique_upload_path(upload_dir, filename)
+    path.write_bytes(data)
+    items.append({
+        "path": str(path),
+        "filename": path.name,
+        "mime": mime,
+        "feedback_language": feedback_language,
+    })
+  return items
+
+
+def list_writing_inputs(node_input: object) -> list[dict[str, str]]:
+  """Read uploaded ADK Web images, or scan ./input/ and ./input/tem/."""
   WRITING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
   feedback_language = _feedback_language_from_input(node_input)
+  uploaded_items = _uploaded_inline_image_inputs(node_input, feedback_language)
+  if uploaded_items:
+    return uploaded_items
+
   items: list[dict[str, str]] = []
   for directory in _writing_input_scan_dirs():
     if not directory.is_dir():
@@ -380,14 +514,6 @@ def list_writing_inputs(node_input: str) -> list[dict[str, str]]:
 def pick_input_route(image_category: ImageCategory):
   """Route key copied from adk-kit's router_intent pick(...) shape."""
   yield Event(route=image_category.category)
-
-
-def _content_text(value: types.Content) -> str:
-  return "".join(
-      part.text
-      for part in value.parts or []
-      if part.text and not getattr(part, "thought", False)
-  )
 
 
 def _model_from_output(value: object, model_type: type[ModelT]) -> ModelT:
@@ -712,20 +838,46 @@ def _grammar_learning_needs(
   ]
 
 
-@node(
-    retry_config=RetryConfig(max_attempts=3, initial_delay=2),
-    rerun_on_resume=True,
-)
-async def process_one_input(ctx: Context, node_input: dict[str, str]):
-  """Classify one input image and run the matching specialist extractor."""
-  path = node_input["path"]
-  filename = node_input["filename"]
-  mime = node_input["mime"]
-  feedback_language = _feedback_language_from_input(
-      node_input.get("feedback_language", DEFAULT_FEEDBACK_LANGUAGE)
-  )
-  yield Event(message=f"Processing {filename} (attempt {ctx.attempt_count})...")
+_PROCESS_INPUT_MAX_ATTEMPTS = 3
 
+
+class InputProcessingError(RuntimeError):
+  """One input image failed classification or extraction."""
+
+
+def _short_failure_reason(exc: BaseException) -> str:
+  inner = getattr(exc, "error", None)
+  if isinstance(inner, BaseException):
+    exc = inner
+  reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+  if len(reason) > 300:
+    return f"{reason[:300]}..."
+  return reason
+
+
+def _task_for_attempt(task: str, attempt_count: int) -> str:
+  """Vary the prompt on retries: temperature=0 + seed=0 makes generation
+  deterministic, so retrying an identical request replays the exact same
+  failure (e.g. a repetition loop that truncates the JSON output)."""
+  if attempt_count <= 1:
+    return task
+  return (
+      f"{task}\n"
+      f"Retry attempt {attempt_count}: the previous attempt produced invalid"
+      " output. Respond with exactly one complete, valid JSON object, keep"
+      " every field concise, and never repeat the same sentence or phrase."
+  )
+
+
+async def _process_one_input_result(
+    ctx: Context,
+    *,
+    path: str,
+    filename: str,
+    mime: str,
+    feedback_language: FeedbackLanguage,
+) -> InputProcessingResult:
+  """Classify one image, run the matching extractor, and build the result."""
   category_raw = await ctx.run_node(
       classify_input_image,
       node_input=_image_content(
@@ -733,7 +885,10 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
           filename=filename,
           mime=mime,
           feedback_language=feedback_language,
-          task="Classify this image before any grading or extraction.",
+          task=_task_for_attempt(
+              "Classify this image before any grading or extraction.",
+              ctx.attempt_count,
+          ),
       ),
       use_sub_branch=True,
   )
@@ -749,7 +904,10 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
             filename=filename,
             mime=mime,
             feedback_language=feedback_language,
-            task="Grade the writing submission by extracting evidence only.",
+            task=_task_for_attempt(
+                "Grade the writing submission by extracting evidence only.",
+                ctx.attempt_count,
+            ),
         ),
         use_sub_branch=True,
     )
@@ -779,23 +937,20 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
         strengths=evidence.strengths,
         improvements=evidence.improvements,
     )
-    yield Event(
-        output=InputProcessingResult(
+    return InputProcessingResult(
+        filename=filename,
+        source_path=path,
+        category="writing",
+        student_name=student_name,
+        submission_date=submission_date,
+        feedback_language=feedback_language,
+        feedback=feedback,
+        learning_needs=_writing_learning_needs(
             filename=filename,
-            source_path=path,
-            category="writing",
             student_name=student_name,
-            submission_date=submission_date,
-            feedback_language=feedback_language,
-            feedback=feedback,
-            learning_needs=_writing_learning_needs(
-                filename=filename,
-                student_name=student_name,
-                evidence=evidence,
-            ),
-        )
+            evidence=evidence,
+        ),
     )
-    return
 
   if route == "grammar_training":
     grammar_raw = await ctx.run_node(
@@ -805,7 +960,10 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
             filename=filename,
             mime=mime,
             feedback_language=feedback_language,
-            task="Extract grammar-training mistakes from this image.",
+            task=_task_for_attempt(
+                "Extract grammar-training mistakes from this image.",
+                ctx.attempt_count,
+            ),
         ),
         use_sub_branch=True,
     )
@@ -822,43 +980,97 @@ async def process_one_input(ctx: Context, node_input: dict[str, str]):
     evidence = evidence.model_copy(
         update={"student_name": student_name, "submission_date": submission_date}
     )
-    yield Event(
-        output=InputProcessingResult(
+    return InputProcessingResult(
+        filename=filename,
+        source_path=path,
+        category="grammar_training",
+        student_name=student_name,
+        submission_date=submission_date,
+        feedback_language=feedback_language,
+        grammar_training=evidence,
+        learning_needs=_grammar_learning_needs(
             filename=filename,
-            source_path=path,
-            category="grammar_training",
             student_name=student_name,
-            submission_date=submission_date,
-            feedback_language=feedback_language,
-            grammar_training=evidence,
-            learning_needs=_grammar_learning_needs(
-                filename=filename,
-                student_name=student_name,
-                evidence=evidence,
-            ),
-        )
+            evidence=evidence,
+        ),
     )
-    return
 
   reason = category.reason or "Image was not recognized as writing or grammar training."
-  yield Event(
-      output=InputProcessingResult(
+  return InputProcessingResult(
+      filename=filename,
+      source_path=path,
+      category="unsupported",
+      student_name=_resolve_student_name(
           filename=filename,
-          source_path=path,
-          category="unsupported",
-          student_name=_resolve_student_name(
-              filename=filename,
-              category_name=category.student_name,
-              evidence_name="unknown",
-          ),
-          submission_date=_resolve_submission_date(
-              evidence_date="",
-              category_date=category.submission_date,
-          ),
-          feedback_language=feedback_language,
-          skipped_reason=reason,
-      )
+          category_name=category.student_name,
+          evidence_name="unknown",
+      ),
+      submission_date=_resolve_submission_date(
+          evidence_date="",
+          category_date=category.submission_date,
+      ),
+      feedback_language=feedback_language,
+      skipped_reason=reason,
   )
+
+
+@node(
+    retry_config=RetryConfig(
+        max_attempts=_PROCESS_INPUT_MAX_ATTEMPTS,
+        initial_delay=2,
+    ),
+    rerun_on_resume=True,
+)
+async def process_one_input(ctx: Context, node_input: dict[str, str]):
+  """Classify one input image and run the matching specialist extractor.
+
+  ADK never retries DynamicNodeFailError raised from ctx.run_node
+  sub-nodes, so their failures would bypass this node's retry_config and
+  kill the whole workflow run. Sub-node failures are therefore caught
+  here and re-raised as InputProcessingError to engage this node's own
+  retries; once the retry budget is spent, the image degrades to a
+  skipped result instead of failing the run.
+  """
+  path = node_input["path"]
+  filename = node_input["filename"]
+  mime = node_input["mime"]
+  feedback_language = _feedback_language_from_input(
+      node_input.get("feedback_language", DEFAULT_FEEDBACK_LANGUAGE)
+  )
+  yield Event(message=f"Processing {filename} (attempt {ctx.attempt_count})...")
+
+  try:
+    result = await _process_one_input_result(
+        ctx,
+        path=path,
+        filename=filename,
+        mime=mime,
+        feedback_language=feedback_language,
+    )
+  except Exception as exc:
+    reason = _short_failure_reason(exc)
+    if ctx.attempt_count < _PROCESS_INPUT_MAX_ATTEMPTS:
+      raise InputProcessingError(
+          f"{filename} failed on attempt {ctx.attempt_count}: {reason}"
+      ) from exc
+    yield Event(
+        message=(
+            f"Skipping {filename} after {ctx.attempt_count} failed"
+            f" attempt(s): {reason}"
+        )
+    )
+    result = InputProcessingResult(
+        filename=filename,
+        source_path=path,
+        category="unsupported",
+        student_name=_student_hint_from_filename(filename),
+        submission_date=_default_submission_date(),
+        feedback_language=feedback_language,
+        skipped_reason=(
+            f"Processing failed after {ctx.attempt_count} attempt(s): {reason}"
+        ),
+    )
+  yield Event(output=result)
 
 
 @node(rerun_on_resume=True)
@@ -868,7 +1080,11 @@ async def orchestrate(ctx: Context, node_input: list[dict[str, str]]):
   if not inputs:
     supported = ", ".join(sorted(MIME_BY_SUFFIX))
     yield Event(
-        message=f"No supported image files found in {WRITING_INPUTS_DIR}: {supported}."
+        message=(
+            "No supported uploaded images or input files found. "
+            f"Checked ADK Web message attachments and {WRITING_INPUTS_DIR}: "
+            f"{supported}."
+        )
     )
     yield Event(output=[])
     return
@@ -1044,7 +1260,10 @@ def write_report(
   TRAINING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
   written: list[Path] = []
+  pdf_links: list[tuple[Path, str]] = []
   pdf_warnings: list[str] = []
+  wps_warnings: list[str] = []
+  session_sections: list[list[str]] = []
   for profile in profiles:
     student = profile.student_name or "unknown"
     safe_student = _safe_name(student)
@@ -1060,7 +1279,7 @@ def write_report(
         encoding="utf-8",
     )
 
-    lines: list[str] = [
+    frontmatter_lines: list[str] = [
         "---",
         "schema_version: 2",
         f"report_type: {_yaml_string('student_learning_profile')}",
@@ -1072,6 +1291,9 @@ def write_report(
         f"learning_need_count: {len(profile.learning_needs)}",
         f"training_input_json: {_yaml_string(str(training_path))}",
         "---",
+    ]
+
+    lines: list[str] = [
         "",
         "# Student Learning Profile",
         "",
@@ -1186,21 +1408,68 @@ def write_report(
       for skipped in profile.skipped:
         lines.append(f"- {skipped}")
 
-    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    report_path.write_text(
+        "\n".join(frontmatter_lines + lines) + "\n", encoding="utf-8"
+    )
     written.extend([report_path, training_path])
+    session_sections.append(lines)
     try:
       pdf_path = export_report_pdf(report_path, output_dir=REPORTS_DIR / "pdf_exports")
     except PdfExportError as exc:
       pdf_warnings.append(f"{report_path.name}: {exc}")
     else:
       written.append(pdf_path)
+      pdf_links.append((pdf_path, f"/reports/{quote(pdf_path.name)}"))
+
+  if session_sections:
+    session_body: list[str] = []
+    for index, section in enumerate(session_sections):
+      if index:
+        session_body.append('<div style="page-break-before: always;"></div>')
+      session_body.extend(section)
+    session_lines = [
+        "---",
+        "schema_version: 2",
+        f"report_type: {_yaml_string('session_learning_profiles')}",
+        f"generated_at: {_yaml_string(display_ts)}",
+        f"student_count: {len(session_sections)}",
+        "---",
+        *session_body,
+    ]
+    session_path = REPORTS_DIR / f"session_{file_ts}.md"
+    session_path.write_text("\n".join(session_lines) + "\n", encoding="utf-8")
+    written.append(session_path)
+    try:
+      session_pdf = export_report_pdf(
+          session_path, output_dir=REPORTS_DIR / "pdf_exports"
+      )
+    except PdfExportError as exc:
+      pdf_warnings.append(f"{session_path.name}: {exc}")
+    else:
+      written.append(session_pdf)
+      pdf_links.append((session_pdf, f"/reports/{quote(session_pdf.name)}"))
+      try:
+        open_pdf_in_wps(session_pdf)
+      except PdfOpenError as exc:
+        wps_warnings.append(f"{session_pdf.name}: {exc}")
 
   summary = f"Wrote {len(written)} file(s):\n" + "\n".join(
       f"- {path}" for path in written
   )
+  if pdf_links:
+    summary += "\n\nPDF report links:\n" + "\n".join(
+        f"- {path.name}\n"
+        f"  View / print: {url}\n"
+        f"  Download: {url}?download=1"
+        for path, url in pdf_links
+    )
   if pdf_warnings:
     summary += "\n\nPDF export warning(s):\n" + "\n".join(
         f"- {warning}" for warning in pdf_warnings
+    )
+  if wps_warnings:
+    summary += "\n\nWPS open warning(s):\n" + "\n".join(
+        f"- {warning}" for warning in wps_warnings
     )
   yield Event(message=summary)
 

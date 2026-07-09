@@ -35,6 +35,7 @@ env/
 *.log
 tmp/
 temp/
+graphify-out/
 
 # Frontend build output
 web/dist/

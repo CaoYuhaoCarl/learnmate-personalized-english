@@ -30,20 +30,24 @@ make check-tools
 
 ## Run
 
-Start ADK from the repository root:
+Start the combined ADK Web and PDF reports app from the repository root:
 
 ```bash
-adk web
+REPORTS_PASSWORD=change-me .venv/bin/uvicorn english_coach.web_app:app --port 8080
 ```
 
-Then choose `english_coach` in the ADK web UI. Drop `.jpg`, `.jpeg`, `.png`,
-`.webp`, `.heic`, or `.heif` submission images into `english_coach/input/` or
-`english_coach/input/tem/`, send any chat message, and the coach renames
-recognized inputs as `Student_YYYY-MM-DD.ext`, writes markdown reports under
-`english_coach/reports/` plus training JSON under
-`english_coach/training_inputs/`. PDF copies are exported automatically under
-`english_coach/reports/pdf_exports/` when `pandoc` and `wkhtmltopdf` are
-available.
+Open <http://127.0.0.1:8080/dev-ui/> and choose `english_coach` in the ADK web
+UI. Attach `.jpg`, `.jpeg`, `.png`, `.webp`, `.heic`, or `.heif` submission
+images to a message and ask the coach to process them. The coach stages uploaded
+images under `english_coach/input/uploads/`, renames recognized inputs as
+`Student_YYYY-MM-DD.ext`, writes markdown reports under `english_coach/reports/`
+plus training JSON under `english_coach/training_inputs/`. PDF copies are
+exported automatically under `english_coach/reports/pdf_exports/` when `pandoc`
+and `wkhtmltopdf` are available.
+
+Open <http://127.0.0.1:8080/reports> to view, print, or download generated
+PDFs. The default username is `teacher`; use `REPORTS_USERNAME` to override it.
+`REPORTS_PASSWORD` must be set before reports can be viewed.
 
 ## PDF export
 

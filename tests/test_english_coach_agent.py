@@ -1,9 +1,12 @@
 import asyncio
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from google.genai import types
 
 from english_coach import agent as coach_agent
 from english_coach import pdf_export
@@ -87,6 +90,110 @@ class EnglishCoachAgentTest(unittest.TestCase):
             ["top.jpg", "staged.png"],
         )
         self.assertEqual([item["filename"] for item in items], ["top.jpg", "staged.png"])
+
+    def test_list_writing_inputs_prefers_adk_web_uploaded_images(self):
+        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "old.png").write_bytes(b"old image bytes")
+            coach_agent.WRITING_INPUTS_DIR = root
+            try:
+                message = types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text="please use English feedback"),
+                        types.Part(
+                            inline_data=types.Blob(
+                                data=b"uploaded image bytes",
+                                display_name="../Suzy homework.png",
+                                mime_type="image/png",
+                            )
+                        ),
+                    ],
+                )
+
+                items = coach_agent.list_writing_inputs(message)
+                uploaded_bytes = Path(items[0]["path"]).read_bytes()
+            finally:
+                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["filename"], "Suzy_homework.png")
+        self.assertEqual(items[0]["mime"], "image/png")
+        self.assertEqual(items[0]["feedback_language"], "en")
+        self.assertEqual(uploaded_bytes, b"uploaded image bytes")
+        self.assertEqual(Path(items[0]["path"]).parent.name, "uploads")
+
+    def test_list_writing_inputs_keeps_multiple_uploaded_images(self):
+        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coach_agent.WRITING_INPUTS_DIR = Path(tmpdir)
+            try:
+                message = types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text="请用中文反馈"),
+                        types.Part(
+                            inline_data=types.Blob(
+                                data=b"first image",
+                                display_name="essay.png",
+                                mime_type="image/png",
+                            )
+                        ),
+                        types.Part(
+                            inline_data=types.Blob(
+                                data=b"second image",
+                                display_name="essay.png",
+                                mime_type="image/png",
+                            )
+                        ),
+                    ],
+                )
+
+                items = coach_agent.list_writing_inputs(message)
+                uploaded_bytes = [
+                    Path(item["path"]).read_bytes() for item in items
+                ]
+            finally:
+                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+
+        self.assertEqual(
+            [item["filename"] for item in items],
+            ["essay.png", "essay_2.png"],
+        )
+        self.assertEqual(
+            [item["feedback_language"] for item in items],
+            ["zh-Hans", "zh-Hans"],
+        )
+        self.assertEqual(uploaded_bytes, [b"first image", b"second image"])
+
+    def test_list_writing_inputs_ignores_non_image_uploads(self):
+        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "top.jpg").write_bytes(b"fake image bytes")
+            coach_agent.WRITING_INPUTS_DIR = root
+            try:
+                message = types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text="please use English feedback"),
+                        types.Part(
+                            inline_data=types.Blob(
+                                data=b"not an image",
+                                display_name="notes.pdf",
+                                mime_type="application/pdf",
+                            )
+                        ),
+                    ],
+                )
+
+                items = coach_agent.list_writing_inputs(message)
+            finally:
+                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+
+        self.assertEqual([item["filename"] for item in items], ["top.jpg"])
+        self.assertEqual(items[0]["feedback_language"], "en")
 
     def test_submission_date_normalization_and_priority(self):
         self.assertEqual(
@@ -385,6 +492,77 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(result.learning_needs[0].source_type, "grammar_training")
         self.assertEqual(result.learning_needs[0].suggested_fix, "He goes to school.")
 
+    def test_task_for_attempt_adds_retry_nudge_only_after_first_attempt(self):
+        base = "Classify this image before any grading or extraction."
+
+        self.assertEqual(coach_agent._task_for_attempt(base, 1), base)
+        nudged = coach_agent._task_for_attempt(base, 2)
+        self.assertIn(base, nudged)
+        self.assertIn("Retry attempt 2", nudged)
+
+    def test_process_one_input_reraises_subnode_failure_for_node_retry(self):
+        async def run_process_one():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                image_path = Path(tmpdir) / "Suzy_writing.png"
+                image_path.write_bytes(b"fake image bytes")
+
+                class FakeContext:
+                    attempt_count = 1
+
+                    async def run_node(self, node, node_input=None, **kwargs):
+                        raise ValueError(
+                            "Invalid JSON: EOF while parsing an object"
+                        )
+
+                async for _ in coach_agent.process_one_input._func(
+                    FakeContext(),
+                    {
+                        "path": str(image_path),
+                        "filename": image_path.name,
+                        "mime": "image/png",
+                        "feedback_language": "en",
+                    },
+                ):
+                    pass
+
+        with self.assertRaises(coach_agent.InputProcessingError):
+            asyncio.run(run_process_one())
+
+    def test_process_one_input_skips_input_after_final_attempt(self):
+        async def run_process_one():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                image_path = Path(tmpdir) / "Suzy_writing.png"
+                image_path.write_bytes(b"fake image bytes")
+
+                class FakeContext:
+                    attempt_count = coach_agent._PROCESS_INPUT_MAX_ATTEMPTS
+
+                    async def run_node(self, node, node_input=None, **kwargs):
+                        raise ValueError(
+                            "Invalid JSON: EOF while parsing an object"
+                        )
+
+                events = [
+                    event
+                    async for event in coach_agent.process_one_input._func(
+                        FakeContext(),
+                        {
+                            "path": str(image_path),
+                            "filename": image_path.name,
+                            "mime": "image/png",
+                            "feedback_language": "en",
+                        },
+                    )
+                ]
+                return events[-1].output
+
+        result = asyncio.run(run_process_one())
+
+        self.assertEqual(result.category, "unsupported")
+        self.assertEqual(result.student_name, "Suzy")
+        self.assertIsNone(result.feedback)
+        self.assertIn("Invalid JSON", result.skipped_reason)
+
     def test_rename_processed_inputs_updates_nested_filenames_and_avoids_collision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -599,7 +777,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     coach_agent,
                     "export_report_pdf",
                     side_effect=fake_export,
-                ) as export_mock:
+                ) as export_mock, mock.patch.object(
+                    coach_agent,
+                    "open_pdf_in_wps",
+                ) as open_mock:
                     events = list(coach_agent.write_report([profile]))
                 report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
                 payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
@@ -611,7 +792,8 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 coach_agent.TRAINING_INPUTS_DIR = old_training_dir
 
         self.assertEqual(len(events), 1)
-        export_mock.assert_called_once()
+        self.assertEqual(export_mock.call_count, 2)
+        self.assertEqual(open_mock.call_count, 1)
         self.assertTrue(report_text.startswith("---\nschema_version: 2\n"))
         self.assertIn('report_type: "student_learning_profile"\n', report_text)
         self.assertIn("#### 范文", report_text)
@@ -634,6 +816,71 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertNotIn("model_essay", payload["feedback_items"][0])
         self.assertEqual(payload["learning_needs"][0]["skill_tag"], "past_tense")
         self.assertIn(str(pdf_path), events[0].message.parts[0].text)
+        self.assertIn(f"/reports/{pdf_path.name}", events[0].message.parts[0].text)
+        self.assertIn(
+            f"/reports/{pdf_path.name}?download=1",
+            events[0].message.parts[0].text,
+        )
+
+    def test_write_report_merges_session_pdf_per_session(self):
+        def make_profile(name: str) -> "coach_agent.StudentLearningProfile":
+            return coach_agent.StudentLearningProfile(
+                student_name=name,
+                feedback_language="zh-Hans",
+                feedback_items=[],
+                grammar_trainings=[],
+                learning_needs=[],
+                skipped=[],
+            )
+
+        profiles = [make_profile("Eve"), make_profile("Suzy")]
+
+        old_reports_dir = coach_agent.REPORTS_DIR
+        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
+            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            try:
+                def fake_export(report_path, output_dir):
+                    pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
+                    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                    pdf_path.write_bytes(b"%PDF-1.4\n")
+                    return pdf_path
+
+                with mock.patch.object(
+                    coach_agent,
+                    "export_report_pdf",
+                    side_effect=fake_export,
+                ) as export_mock, mock.patch.object(
+                    coach_agent,
+                    "open_pdf_in_wps",
+                ) as open_mock:
+                    events = list(coach_agent.write_report(profiles))
+                session_md = next(coach_agent.REPORTS_DIR.glob("session_*.md"))
+                session_pdf = next(
+                    (coach_agent.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
+                )
+                session_text = session_md.read_text(encoding="utf-8")
+            finally:
+                coach_agent.REPORTS_DIR = old_reports_dir
+                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+
+        # One PDF per student plus a single combined session PDF.
+        self.assertEqual(export_mock.call_count, 3)
+        open_mock.assert_called_once_with(session_pdf)
+        self.assertTrue(
+            session_text.startswith("---\nschema_version: 2\n")
+        )
+        self.assertIn('report_type: "session_learning_profiles"', session_text)
+        self.assertIn("student_count: 2", session_text)
+        # Exactly one page break separates the two students.
+        self.assertEqual(
+            session_text.count('<div style="page-break-before: always;"></div>'),
+            1,
+        )
+        self.assertEqual(session_text.count("# Student Learning Profile"), 2)
+        message = events[0].message.parts[0].text
+        self.assertIn(f"/reports/{session_pdf.name}", message)
 
     def test_write_report_warns_when_pdf_export_fails(self):
         profile = coach_agent.StudentLearningProfile(
@@ -670,6 +917,53 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertIn("PDF export warning(s):", events[0].message.parts[0].text)
         self.assertIn("pandoc missing", events[0].message.parts[0].text)
 
+    def test_write_report_warns_when_wps_open_fails(self):
+        profile = coach_agent.StudentLearningProfile(
+            student_name="Eve",
+            feedback_language="zh-Hans",
+            feedback_items=[],
+            grammar_trainings=[],
+            learning_needs=[],
+            skipped=[],
+        )
+
+        old_reports_dir = coach_agent.REPORTS_DIR
+        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
+            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            try:
+                def fake_export(report_path, output_dir):
+                    pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
+                    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                    pdf_path.write_bytes(b"%PDF-1.4\n")
+                    return pdf_path
+
+                with mock.patch.object(
+                    coach_agent,
+                    "export_report_pdf",
+                    side_effect=fake_export,
+                ), mock.patch.object(
+                    coach_agent,
+                    "open_pdf_in_wps",
+                    side_effect=coach_agent.PdfOpenError("WPS unavailable"),
+                ) as open_mock:
+                    events = list(coach_agent.write_report([profile]))
+                session_pdf = next(
+                    (coach_agent.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
+                )
+                session_pdf_exists = session_pdf.is_file()
+            finally:
+                coach_agent.REPORTS_DIR = old_reports_dir
+                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+
+        open_mock.assert_called_once_with(session_pdf)
+        self.assertTrue(session_pdf_exists)
+        message = events[0].message.parts[0].text
+        self.assertIn("WPS open warning(s):", message)
+        self.assertIn("WPS unavailable", message)
+        self.assertNotIn("PDF export warning(s):", message)
+
     def test_reports_for_date_matches_markdown_reports_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reports_dir = Path(tmpdir)
@@ -683,6 +977,50 @@ class EnglishCoachAgentTest(unittest.TestCase):
             matches = pdf_export.reports_for_date("2026-06-06", reports_dir)
 
         self.assertEqual(matches, [today])
+
+    def test_open_pdf_in_wps_uses_bundle_id_on_macos(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / "session.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            with mock.patch.object(pdf_export.sys, "platform", "darwin"):
+                with mock.patch.object(pdf_export.subprocess, "run") as run_mock:
+                    pdf_export.open_pdf_in_wps(pdf_path)
+
+        run_mock.assert_called_once_with(
+            [
+                "open",
+                "-b",
+                "com.kingsoft.wpsoffice.mac",
+                str(pdf_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_open_pdf_in_wps_skips_non_macos(self):
+        with mock.patch.object(pdf_export.sys, "platform", "linux"):
+            with mock.patch.object(pdf_export.subprocess, "run") as run_mock:
+                pdf_export.open_pdf_in_wps("session.pdf")
+
+        run_mock.assert_not_called()
+
+    def test_open_pdf_in_wps_reports_launch_failure(self):
+        failure = subprocess.CalledProcessError(
+            1,
+            ["open"],
+            stderr="Application not found",
+        )
+        with mock.patch.object(pdf_export.sys, "platform", "darwin"):
+            with mock.patch.object(
+                pdf_export.subprocess,
+                "run",
+                side_effect=failure,
+            ):
+                with self.assertRaises(pdf_export.PdfOpenError) as error:
+                    pdf_export.open_pdf_in_wps("session.pdf")
+
+        self.assertIn("Application not found", str(error.exception))
 
     def test_export_report_pdf_invokes_pandoc_with_print_options(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -727,6 +1065,42 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertTrue(run_mock.call_args.kwargs["check"])
         self.assertTrue(run_mock.call_args.kwargs["capture_output"])
         self.assertTrue(run_mock.call_args.kwargs["text"])
+
+    def test_export_report_pdf_runs_pandoc_from_writable_temp_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "Eve_2026-06-06_09-00-00.md"
+            css = root / "report_print.css"
+            output_dir = root / "pdf_exports"
+            markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
+            css.write_text("@page { size: A4; }\n", encoding="utf-8")
+
+            def fake_which(name):
+                return f"/tools/{name}"
+
+            def fake_run(command, **kwargs):
+                cwd = Path(kwargs["cwd"])
+                self.assertTrue(cwd.is_dir())
+                self.assertEqual(cwd.parent, output_dir)
+                self.assertEqual(kwargs["env"]["TMPDIR"], str(cwd))
+                self.assertEqual(kwargs["env"]["TEMP"], str(cwd))
+                self.assertEqual(kwargs["env"]["TMP"], str(cwd))
+                output_path = Path(command[command.index("-o") + 1])
+                output_path.write_bytes(b"%PDF-1.4\n")
+
+            with mock.patch.object(pdf_export.shutil, "which", side_effect=fake_which):
+                with mock.patch.object(
+                    pdf_export.subprocess,
+                    "run",
+                    side_effect=fake_run,
+                ):
+                    pdf_path = pdf_export.export_report_pdf(
+                        markdown,
+                        output_dir=output_dir,
+                        css_path=css,
+                    )
+
+        self.assertEqual(pdf_path, output_dir / "Eve_2026-06-06_09-00-00.pdf")
 
     def test_export_report_pdf_reports_missing_tool(self):
         with tempfile.TemporaryDirectory() as tmpdir:

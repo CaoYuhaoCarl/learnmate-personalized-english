@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence
 
@@ -14,10 +16,15 @@ PACKAGE_DIR = Path(__file__).parent
 REPORTS_DIR = PACKAGE_DIR / "reports"
 DEFAULT_CSS_PATH = PACKAGE_DIR / "report_print.css"
 DEFAULT_OUTPUT_DIR = REPORTS_DIR / "pdf_exports"
+WPS_BUNDLE_ID = "com.kingsoft.wpsoffice.mac"
 
 
 class PdfExportError(RuntimeError):
     """Raised when a report cannot be exported to PDF."""
+
+
+class PdfOpenError(RuntimeError):
+    """Raised when a generated PDF cannot be opened in WPS."""
 
 
 def _require_tool(name: str) -> str:
@@ -28,6 +35,31 @@ def _require_tool(name: str) -> str:
             "before exporting PDFs."
         )
     return tool_path
+
+
+def _absolute_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
+def open_pdf_in_wps(pdf_path: Path | str) -> None:
+    """Open a PDF in the local macOS WPS app when available."""
+    if sys.platform != "darwin":
+        return
+
+    pdf = _absolute_path(Path(pdf_path))
+    command = ["open", "-b", WPS_BUNDLE_ID, str(pdf)]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        message = f"Could not open PDF in WPS: {pdf}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise PdfOpenError(message) from exc
+    except OSError as exc:
+        raise PdfOpenError(f"Could not open PDF in WPS: {pdf}: {exc}") from exc
 
 
 def reports_for_date(
@@ -58,12 +90,15 @@ def export_report_pdf(
 
     output.mkdir(parents=True, exist_ok=True)
     pdf_path = output / f"{markdown.stem}.pdf"
+    markdown_for_command = _absolute_path(markdown)
+    css_for_command = _absolute_path(css)
+    pdf_for_command = _absolute_path(pdf_path)
     command = [
         pandoc,
-        str(markdown),
+        str(markdown_for_command),
         "--from=gfm+yaml_metadata_block",
         "--standalone",
-        f"--css={css}",
+        f"--css={css_for_command}",
         "--pdf-engine",
         wkhtmltopdf,
         "--pdf-engine-opt=--enable-local-file-access",
@@ -78,17 +113,32 @@ def export_report_pdf(
         "--pdf-engine-opt=--margin-left",
         "--pdf-engine-opt=14mm",
         "-o",
-        str(pdf_path),
+        str(pdf_for_command),
     ]
 
-    try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "").strip()
-        message = f"PDF export failed for {markdown}"
-        if detail:
-            message = f"{message}: {detail}"
-        raise PdfExportError(message) from exc
+    env = os.environ.copy()
+    with tempfile.TemporaryDirectory(
+        prefix=f"{markdown.stem}-",
+        dir=_absolute_path(output),
+    ) as temp_dir:
+        env["TMPDIR"] = temp_dir
+        env["TEMP"] = temp_dir
+        env["TMP"] = temp_dir
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=temp_dir,
+                env=env,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()
+            message = f"PDF export failed for {markdown}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise PdfExportError(message) from exc
 
     if not pdf_path.is_file():
         raise PdfExportError(f"PDF export did not create output: {pdf_path}")
