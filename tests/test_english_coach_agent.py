@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,10 +10,23 @@ from unittest import mock
 from google.genai import types
 
 from english_coach import agent as coach_agent
+from english_coach import history_store
 from english_coach import pdf_export
 
 
 class EnglishCoachAgentTest(unittest.TestCase):
+    def setUp(self):
+        # Sandbox the data root (most importantly the history DB, resolved per
+        # call) so no test can ever write into the real student records.
+        data_root = tempfile.TemporaryDirectory()
+        self.addCleanup(data_root.cleanup)
+        self.data_root = Path(data_root.name)
+        env_patcher = mock.patch.dict(
+            os.environ, {history_store.DATA_ROOT_ENV: data_root.name}
+        )
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
     def test_extractor_output_schema_excludes_score_fields(self):
         fields = set(coach_agent.extractor.output_schema.model_fields)
 
@@ -782,9 +796,13 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     "open_pdf_in_wps",
                 ) as open_mock:
                     events = list(coach_agent.write_report([profile]))
-                report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
+                report = next(
+                    (coach_agent.REPORTS_DIR / "students").glob("Eve_*.md")
+                )
                 payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
-                pdf_path = next((coach_agent.REPORTS_DIR / "pdf_exports").glob("Eve_*.pdf"))
+                pdf_path = next(
+                    (coach_agent.REPORTS_DIR / "pdf").glob("Eve_*.pdf")
+                )
                 report_text = report.read_text(encoding="utf-8")
                 payload = json.loads(payload_path.read_text(encoding="utf-8"))
             finally:
@@ -815,6 +833,14 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(payload["student_name"], "Eve")
         self.assertNotIn("model_essay", payload["feedback_items"][0])
         self.assertEqual(payload["learning_needs"][0]["skill_tag"], "past_tense")
+        # The history record landed in the sandbox DB, not the real one.
+        self.assertTrue((self.data_root / "data" / "learnmate.db").is_file())
+        history = history_store.get_student_history("Eve")
+        self.assertIsNotNone(history)
+        self.assertEqual(
+            sorted(sub["category"] for sub in history["submissions"]),
+            ["grammar_training", "writing"],
+        )
         self.assertIn(str(pdf_path), events[0].message.parts[0].text)
         self.assertIn(f"/reports/{pdf_path.name}", events[0].message.parts[0].text)
         self.assertIn(
@@ -856,9 +882,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     "open_pdf_in_wps",
                 ) as open_mock:
                     events = list(coach_agent.write_report(profiles))
-                session_md = next(coach_agent.REPORTS_DIR.glob("session_*.md"))
+                session_md = next(
+                    (coach_agent.REPORTS_DIR / "sessions").glob("session_*.md")
+                )
                 session_pdf = next(
-                    (coach_agent.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
+                    (coach_agent.REPORTS_DIR / "pdf").glob("session_*.pdf")
                 )
                 session_text = session_md.read_text(encoding="utf-8")
             finally:
@@ -904,7 +932,9 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     side_effect=coach_agent.PdfExportError("pandoc missing"),
                 ):
                     events = list(coach_agent.write_report([profile]))
-                report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
+                report = next(
+                    (coach_agent.REPORTS_DIR / "students").glob("Eve_*.md")
+                )
                 payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
                 report_exists = report.is_file()
                 payload_exists = payload_path.is_file()
@@ -950,7 +980,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 ) as open_mock:
                     events = list(coach_agent.write_report([profile]))
                 session_pdf = next(
-                    (coach_agent.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
+                    (coach_agent.REPORTS_DIR / "pdf").glob("session_*.pdf")
                 )
                 session_pdf_exists = session_pdf.is_file()
             finally:
@@ -967,16 +997,24 @@ class EnglishCoachAgentTest(unittest.TestCase):
     def test_reports_for_date_matches_markdown_reports_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reports_dir = Path(tmpdir)
-            today = reports_dir / "A_2026-06-06_09-00-00.md"
-            other_day = reports_dir / "A_2026-06-05_09-00-00.md"
+            students_dir = reports_dir / "students"
+            sessions_dir = reports_dir / "sessions"
+            students_dir.mkdir()
+            sessions_dir.mkdir()
+            today = students_dir / "A_2026-06-06_09-00-00.md"
+            session = sessions_dir / "session_2026-06-06_09-00-00.md"
+            legacy = reports_dir / "B_2026-06-06_09-00-00.md"
+            other_day = students_dir / "A_2026-06-05_09-00-00.md"
             pdf = reports_dir / "A_2026-06-06_09-00-00.pdf"
             today.write_text("# A\n", encoding="utf-8")
+            session.write_text("# Session\n", encoding="utf-8")
+            legacy.write_text("# Legacy\n", encoding="utf-8")
             other_day.write_text("# A\n", encoding="utf-8")
             pdf.write_bytes(b"%PDF-1.4\n")
 
             matches = pdf_export.reports_for_date("2026-06-06", reports_dir)
 
-        self.assertEqual(matches, [today])
+        self.assertEqual(matches, sorted([today, session, legacy]))
 
     def test_open_pdf_in_wps_uses_bundle_id_on_macos(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1027,7 +1065,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             root = Path(tmpdir)
             markdown = root / "Eve_2026-06-06_09-00-00.md"
             css = root / "report_print.css"
-            output_dir = root / "pdf_exports"
+            output_dir = root / "pdf"
             markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
             css.write_text("@page { size: A4; }\n", encoding="utf-8")
 
@@ -1071,7 +1109,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             root = Path(tmpdir)
             markdown = root / "Eve_2026-06-06_09-00-00.md"
             css = root / "report_print.css"
-            output_dir = root / "pdf_exports"
+            output_dir = root / "pdf"
             markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
             css.write_text("@page { size: A4; }\n", encoding="utf-8")
 
@@ -1126,7 +1164,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             root = Path(tmpdir)
             markdown = root / "Eve_2026-06-06_09-00-00.md"
             css = root / "report_print.css"
-            output_dir = root / "pdf_exports"
+            output_dir = root / "pdf"
             markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
             css.write_text("@page { size: A4; }\n", encoding="utf-8")
 
@@ -1145,8 +1183,12 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertIn("did not create output", str(error.exception))
 
     def test_pdf_export_main_defaults_to_todays_reports(self):
-        report = Path("english_coach/reports/Eve_2026-06-06_09-00-00.md")
-        pdf_path = Path("english_coach/reports/pdf_exports/Eve_2026-06-06_09-00-00.pdf")
+        report = Path(
+            "english_coach/reports/students/Eve_2026-06-06_09-00-00.md"
+        )
+        pdf_path = Path(
+            "english_coach/reports/pdf/Eve_2026-06-06_09-00-00.pdf"
+        )
         with mock.patch.object(pdf_export, "_default_date", return_value="2026-06-06"):
             with mock.patch.object(
                 pdf_export,

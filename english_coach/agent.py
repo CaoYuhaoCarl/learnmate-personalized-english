@@ -47,14 +47,16 @@ from google.genai import types
 from pydantic import BaseModel
 from pydantic import Field
 
+from . import history_store
+from . import report_layout
 from .pdf_export import PdfExportError
 from .pdf_export import PdfOpenError
 from .pdf_export import export_report_pdf
 from .pdf_export import open_pdf_in_wps
 
-WRITING_INPUTS_DIR = Path(__file__).parent / "input"
-REPORTS_DIR = Path(__file__).parent / "reports"
-TRAINING_INPUTS_DIR = Path(__file__).parent / "training_inputs"
+WRITING_INPUTS_DIR = history_store.resolve_writing_inputs_dir()
+REPORTS_DIR = history_store.resolve_reports_dir()
+TRAINING_INPUTS_DIR = history_store.resolve_training_inputs_dir()
 MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -259,7 +261,6 @@ classify_input_image = Agent(
         " short explanation."
     ),
     output_schema=ImageCategory,
-    output_key="image_category",
     generate_content_config=types.GenerateContentConfig(
         temperature=0,
         seed=0,
@@ -1256,18 +1257,23 @@ def write_report(
   now = datetime.datetime.now().astimezone()
   file_ts = now.strftime("%Y-%m-%d_%H-%M-%S")
   display_ts = now.strftime("%Y-%m-%d %H:%M:%S")
-  REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+  student_reports_dir = report_layout.student_markdown_dir(REPORTS_DIR)
+  session_reports_dir = report_layout.session_markdown_dir(REPORTS_DIR)
+  pdf_reports_dir = report_layout.pdf_dir(REPORTS_DIR)
+  student_reports_dir.mkdir(parents=True, exist_ok=True)
+  session_reports_dir.mkdir(parents=True, exist_ok=True)
   TRAINING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
   written: list[Path] = []
   pdf_links: list[tuple[Path, str]] = []
   pdf_warnings: list[str] = []
   wps_warnings: list[str] = []
+  db_warnings: list[str] = []
   session_sections: list[list[str]] = []
   for profile in profiles:
     student = profile.student_name or "unknown"
     safe_student = _safe_name(student)
-    report_path = REPORTS_DIR / f"{safe_student}_{file_ts}.md"
+    report_path = student_reports_dir / f"{safe_student}_{file_ts}.md"
     training_path = TRAINING_INPUTS_DIR / f"{safe_student}_{file_ts}.json"
     training_path.write_text(
         json.dumps(
@@ -1414,12 +1420,22 @@ def write_report(
     written.extend([report_path, training_path])
     session_sections.append(lines)
     try:
-      pdf_path = export_report_pdf(report_path, output_dir=REPORTS_DIR / "pdf_exports")
+      pdf_path = export_report_pdf(report_path, output_dir=pdf_reports_dir)
     except PdfExportError as exc:
       pdf_warnings.append(f"{report_path.name}: {exc}")
     else:
       written.append(pdf_path)
       pdf_links.append((pdf_path, f"/reports/{quote(pdf_path.name)}"))
+
+    try:
+      history_store.record_student_profile(
+          profile.model_dump(mode="json"),
+          report_path=report_path,
+          training_path=training_path,
+          recorded_at=now,
+      )
+    except Exception as exc:  # noqa: BLE001 - persistence must never abort report writing
+      db_warnings.append(f"{report_path.name}: {exc}")
 
   if session_sections:
     session_body: list[str] = []
@@ -1436,12 +1452,12 @@ def write_report(
         "---",
         *session_body,
     ]
-    session_path = REPORTS_DIR / f"session_{file_ts}.md"
+    session_path = session_reports_dir / f"session_{file_ts}.md"
     session_path.write_text("\n".join(session_lines) + "\n", encoding="utf-8")
     written.append(session_path)
     try:
       session_pdf = export_report_pdf(
-          session_path, output_dir=REPORTS_DIR / "pdf_exports"
+          session_path, output_dir=pdf_reports_dir
       )
     except PdfExportError as exc:
       pdf_warnings.append(f"{session_path.name}: {exc}")
@@ -1470,6 +1486,10 @@ def write_report(
   if wps_warnings:
     summary += "\n\nWPS open warning(s):\n" + "\n".join(
         f"- {warning}" for warning in wps_warnings
+    )
+  if db_warnings:
+    summary += "\n\nHistory DB warning(s):\n" + "\n".join(
+        f"- {warning}" for warning in db_warnings
     )
   yield Event(message=summary)
 

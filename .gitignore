@@ -46,3 +46,8 @@ english_coach/input/*
 english_coach/training_inputs/*
 !english_coach/training_inputs/.gitkeep
 english_coach/reports/
+english_coach/data/*
+!english_coach/data/.gitkeep
+
+# LEARNMATE_DATA_ROOT sandbox workspace
+/sandbox/

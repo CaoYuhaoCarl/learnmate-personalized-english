@@ -12,10 +12,13 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
+from . import history_store
+from . import report_layout
+
 PACKAGE_DIR = Path(__file__).parent
-REPORTS_DIR = PACKAGE_DIR / "reports"
+REPORTS_DIR = history_store.resolve_reports_dir()
 DEFAULT_CSS_PATH = PACKAGE_DIR / "report_print.css"
-DEFAULT_OUTPUT_DIR = REPORTS_DIR / "pdf_exports"
+DEFAULT_OUTPUT_DIR = report_layout.pdf_dir(REPORTS_DIR)
 WPS_BUNDLE_ID = "com.kingsoft.wpsoffice.mac"
 
 
@@ -67,7 +70,12 @@ def reports_for_date(
     reports_dir: Path = REPORTS_DIR,
 ) -> list[Path]:
     """Return Markdown reports generated on a YYYY-MM-DD date."""
-    return sorted(reports_dir.glob(f"*_{date_text}_*.md"))
+    matches = {
+        report
+        for directory in report_layout.markdown_dirs(reports_dir)
+        for report in directory.glob(f"*_{date_text}_*.md")
+    }
+    return sorted(matches)
 
 
 def export_report_pdf(
