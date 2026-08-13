@@ -104,9 +104,12 @@ inside `english_coach/input/uploads/` before the existing workflow runs.
 
 ## Current limitations
 
-- Uploaded inputs and generated reports live inside the running Machine. Use a
-  Fly Volume mounted at `/app/english_coach/reports` or external storage before
-  sharing this with real teachers for ongoing use.
+- Uploaded inputs, generated reports, and the cumulative student history
+  database all live inside the running Machine.
+  Mount a Fly Volume (for example at `/data`) and set
+  `LEARNMATE_DATA_ROOT=/data` so the database, `reports/`, `training_inputs/`,
+  and `input/` all persist across deploys.
+  Make sure the volume is writable by the app user before first boot.
 - PDF export tools (`pandoc` and `wkhtmltopdf`) are installed in the image, with
   CJK fonts available for Chinese text. Markdown and JSON reports are still
   produced even if PDF export fails later.

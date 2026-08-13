@@ -1,4 +1,4 @@
-google-adk==2.2.0
+google-adk==2.4.0
 fastapi>=0.115.0
 python-multipart>=0.0.20
 uvicorn>=0.34.0

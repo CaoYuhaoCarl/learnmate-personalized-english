@@ -4,6 +4,6 @@ version = "0.2.0"
 description = "ADK v2 workflow for routed English coaching feedback and training inputs from ./input/."
 requires-python = ">=3.10"
 dependencies = [
-    "google-adk",
+    "google-adk==2.4.0",
     "pydantic>=2",
 ]
