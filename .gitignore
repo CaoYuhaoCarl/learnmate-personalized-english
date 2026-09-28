@@ -29,6 +29,7 @@ env/
 .DS_Store
 .idea/
 .vscode/
+.obsidian/
 .claude/settings.local.json
 
 # Logs and temporary files
