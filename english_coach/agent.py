@@ -1156,7 +1156,7 @@ def _rename_processed_input(
   if not _known_name(result.student_name):
     return result, None
 
-  student_segment = _safe_input_student_segment(result.student_name)
+  student_segment = _safe_filename_segment(result.student_name)
   if student_segment == "unknown":
     return result, None
 
