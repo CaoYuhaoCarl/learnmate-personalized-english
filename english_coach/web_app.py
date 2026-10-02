@@ -19,10 +19,10 @@ from fastapi.security import HTTPBasicCredentials
 from google.adk.cli.fast_api import get_fast_api_app
 from google.adk.cli.utils.agent_loader import AgentLoader
 
-PACKAGE_DIR = Path(__file__).parent
-PROJECT_DIR = PACKAGE_DIR.parent
-REPORTS_DIR = PACKAGE_DIR / "reports"
-PDF_EXPORTS_DIRNAME = "pdf_exports"
+from .constants import PDF_EXPORTS_DIRNAME
+from .constants import PROJECT_DIR
+from .constants import REPORTS_DIR
+
 REPORTS_USERNAME_ENV = "REPORTS_USERNAME"
 REPORTS_PASSWORD_ENV = "REPORTS_PASSWORD"
 ADK_APP_NAME = "english_coach"

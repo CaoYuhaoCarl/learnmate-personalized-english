@@ -10,6 +10,7 @@ htmlcov/
 
 # Virtual environments
 .venv/
+.venv-*/
 venv/
 env/
 
@@ -18,8 +19,6 @@ env/
 .env.*
 *.env
 *.env.*
-!**/*_agent/.env.example
-/.env.example
 
 # ADK local runtime state
 .adk/
@@ -35,10 +34,6 @@ env/
 *.log
 tmp/
 temp/
-graphify-out/
-
-# Frontend build output
-web/dist/
 
 # English coach local inputs and generated reports
 english_coach/input/*

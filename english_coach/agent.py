@@ -47,14 +47,14 @@ from google.genai import types
 from pydantic import BaseModel
 from pydantic import Field
 
+from .constants import PDF_EXPORTS_DIR
+from .constants import REPORTS_DIR
+from .constants import TRAINING_INPUTS_DIR
+from .constants import WRITING_INPUTS_DIR
 from .pdf_export import PdfExportError
 from .pdf_export import PdfOpenError
 from .pdf_export import export_report_pdf
 from .pdf_export import open_pdf_in_wps
-
-WRITING_INPUTS_DIR = Path(__file__).parent / "input"
-REPORTS_DIR = Path(__file__).parent / "reports"
-TRAINING_INPUTS_DIR = Path(__file__).parent / "training_inputs"
 MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -420,7 +420,7 @@ def _safe_upload_filename(
   if not raw_name:
     return f"uploaded_{index}{suffix}"
 
-  raw_name = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', "_", raw_name)
+  raw_name = _safe_filename_segment(raw_name)
   raw_path = Path(raw_name)
   raw_suffix = raw_path.suffix.lower()
   if raw_suffix in MIME_BY_SUFFIX:
@@ -433,18 +433,12 @@ def _safe_upload_filename(
 
 
 def _unique_upload_path(directory: Path, filename: str) -> Path:
-  candidate = directory / filename
-  if not candidate.exists():
-    return candidate
-
-  stem = Path(filename).stem
-  suffix = Path(filename).suffix
-  index = 2
-  while True:
-    candidate = directory / f"{stem}_{index}{suffix}"
-    if not candidate.exists():
-      return candidate
-    index += 1
+  return _unique_path(
+      directory=directory,
+      stem=Path(filename).stem,
+      suffix=Path(filename).suffix,
+      exclude=None,
+  )
 
 
 def _uploaded_inline_image_inputs(
@@ -582,11 +576,6 @@ def _score_from_evidence(evidence: WritingEvidence) -> DimensionScores:
   )
 
 
-def _safe_name(name: str) -> str:
-  """Make a student name safe for use as a filename segment."""
-  s = (name or "").strip().replace(" ", "_")
-  s = re.sub(r'[/\\:*?"<>|]+', "", s)
-  return s or "unknown"
 
 
 def _known_name(value: str | None) -> bool:
@@ -666,14 +655,42 @@ def _resolve_submission_date(
   )
 
 
-def _safe_input_student_segment(name: str) -> str:
-  segment = _safe_name(name)
-  segment = re.sub(r"^[._-]+|[._-]+$", "", segment)
-  return segment or "unknown"
+def _unique_path(
+    *,
+    directory: Path,
+    stem: str,
+    suffix: str,
+    exclude: Path | None = None,
+) -> Path:
+  """Find a unique path in directory with the given stem and suffix.
+
+  If exclude is provided and matches the candidate, return exclude unchanged."""
+  candidate = directory / f"{stem}{suffix}"
+  if candidate == exclude:
+    return exclude
+  if not candidate.exists():
+    return candidate
+
+  index = 2
+  while True:
+    candidate = directory / f"{stem}_{index}{suffix}"
+    if candidate == exclude:
+      return exclude
+    if not candidate.exists():
+      return candidate
+    index += 1
+def _safe_filename_segment(name: str) -> str:
+  """Make a name safe for use as a filename segment."""
+  s = (name or "").strip().replace(" ", "_")
+  s = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', "", s)
+  return s or "unknown"
 
 
 def _canonical_input_stem(student_name: str, submission_date: str) -> str:
-  return f"{_safe_input_student_segment(student_name)}_{submission_date}"
+  segment = _safe_filename_segment(student_name)
+  segment = re.sub(r"^[._-]+|[._-]+$", "", segment)
+  segment = segment or "unknown"
+  return f"{segment}_{submission_date}"
 
 
 def _unique_input_path(
@@ -681,19 +698,12 @@ def _unique_input_path(
     source_path: Path,
     target_stem: str,
 ) -> Path:
-  target_dir = source_path.parent
-  suffix = source_path.suffix
-  candidate = target_dir / f"{target_stem}{suffix}"
-  if candidate == source_path:
-    return source_path
-
-  index = 2
-  while candidate.exists():
-    if candidate == source_path:
-      return source_path
-    candidate = target_dir / f"{target_stem}_{index}{suffix}"
-    index += 1
-  return candidate
+  return _unique_path(
+      directory=source_path.parent,
+      stem=target_stem,
+      suffix=source_path.suffix,
+      exclude=source_path,
+  )
 
 
 def _image_content(
@@ -869,6 +879,32 @@ def _task_for_attempt(task: str, attempt_count: int) -> str:
   )
 
 
+async def _run_extractor(
+    ctx: Context,
+    *,
+    agent: Agent,
+    schema: type[ModelT],
+    path: str,
+    filename: str,
+    mime: str,
+    feedback_language: FeedbackLanguage,
+    task_description: str,
+) -> ModelT:
+  """Run one extractor agent and return validated output."""
+  raw_output = await ctx.run_node(
+      agent,
+      node_input=_image_content(
+          path=path,
+          filename=filename,
+          mime=mime,
+          feedback_language=feedback_language,
+          task=_task_for_attempt(task_description, ctx.attempt_count),
+      ),
+      use_sub_branch=True,
+  )
+  return _model_from_output(raw_output, schema)
+
+
 async def _process_one_input_result(
     ctx: Context,
     *,
@@ -878,40 +914,30 @@ async def _process_one_input_result(
     feedback_language: FeedbackLanguage,
 ) -> InputProcessingResult:
   """Classify one image, run the matching extractor, and build the result."""
-  category_raw = await ctx.run_node(
-      classify_input_image,
-      node_input=_image_content(
-          path=path,
-          filename=filename,
-          mime=mime,
-          feedback_language=feedback_language,
-          task=_task_for_attempt(
-              "Classify this image before any grading or extraction.",
-              ctx.attempt_count,
-          ),
-      ),
-      use_sub_branch=True,
+  category = await _run_extractor(
+      ctx,
+      agent=classify_input_image,
+      schema=ImageCategory,
+      path=path,
+      filename=filename,
+      mime=mime,
+      feedback_language=feedback_language,
+      task_description="Classify this image before any grading or extraction.",
   )
-  category = _model_from_output(category_raw, ImageCategory)
   route_event = next(pick_input_route(category))
   route = route_event.actions.route
 
   if route == "writing":
-    evidence_raw = await ctx.run_node(
-        extractor,
-        node_input=_image_content(
-            path=path,
-            filename=filename,
-            mime=mime,
-            feedback_language=feedback_language,
-            task=_task_for_attempt(
-                "Grade the writing submission by extracting evidence only.",
-                ctx.attempt_count,
-            ),
-        ),
-        use_sub_branch=True,
+    evidence = await _run_extractor(
+        ctx,
+        agent=extractor,
+        schema=WritingEvidence,
+        path=path,
+        filename=filename,
+        mime=mime,
+        feedback_language=feedback_language,
+        task_description="Grade the writing submission by extracting evidence only.",
     )
-    evidence = _model_from_output(evidence_raw, WritingEvidence)
     student_name = _resolve_student_name(
         filename=filename,
         category_name=category.student_name,
@@ -953,21 +979,16 @@ async def _process_one_input_result(
     )
 
   if route == "grammar_training":
-    grammar_raw = await ctx.run_node(
-        grammar_training_extractor,
-        node_input=_image_content(
-            path=path,
-            filename=filename,
-            mime=mime,
-            feedback_language=feedback_language,
-            task=_task_for_attempt(
-                "Extract grammar-training mistakes from this image.",
-                ctx.attempt_count,
-            ),
-        ),
-        use_sub_branch=True,
+    evidence = await _run_extractor(
+        ctx,
+        agent=grammar_training_extractor,
+        schema=GrammarTrainingEvidence,
+        path=path,
+        filename=filename,
+        mime=mime,
+        feedback_language=feedback_language,
+        task_description="Extract grammar-training mistakes from this image.",
     )
-    evidence = _model_from_output(grammar_raw, GrammarTrainingEvidence)
     student_name = _resolve_student_name(
         filename=filename,
         category_name=category.student_name,
@@ -1243,6 +1264,149 @@ def _markdown_cell(value: object) -> str:
   return str(value).replace("\n", "<br>").replace("|", "\\|")
 
 
+def _render_profile_markdown(
+    profile: StudentLearningProfile,
+    *,
+    display_ts: str,
+    training_path: Path,
+) -> tuple[list[str], list[str]]:
+  """Render one student profile as frontmatter and body lines.
+
+  Returns (frontmatter_lines, body_lines)."""
+  student = profile.student_name or "unknown"
+
+  frontmatter_lines: list[str] = [
+      "---",
+      "schema_version: 2",
+      f"report_type: {_yaml_string('student_learning_profile')}",
+      f"student: {_yaml_string(student)}",
+      f"feedback_language: {_yaml_string(profile.feedback_language)}",
+      f"generated_at: {_yaml_string(display_ts)}",
+      f"submission_count: {len(profile.feedback_items)}",
+      f"grammar_training_count: {len(profile.grammar_trainings)}",
+      f"learning_need_count: {len(profile.learning_needs)}",
+      f"training_input_json: {_yaml_string(str(training_path))}",
+      "---",
+  ]
+
+  lines: list[str] = [
+      "",
+      "# Student Learning Profile",
+      "",
+      "## Report Info",
+      "| Field | Value |",
+      "| --- | --- |",
+      f"| Student | {_markdown_cell(student)} |",
+      f"| Feedback Language | {_markdown_cell(profile.feedback_language)} |",
+      f"| Feedback At | {_markdown_cell(display_ts)} |",
+      f"| Writing Submissions | {len(profile.feedback_items)} |",
+      f"| Grammar Trainings | {len(profile.grammar_trainings)} |",
+      f"| Learning Needs | {len(profile.learning_needs)} |",
+      f"| Training JSON | {_markdown_cell(training_path)} |",
+      "",
+  ]
+
+  if profile.feedback_items:
+    lines.extend([
+        "## Score Summary",
+        "| Submission | Overall | Content | Structure | Language | Handwriting |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    for feedback in profile.feedback_items:
+      d = feedback.dimensions
+      lines.append(
+          f"| {_markdown_cell(feedback.filename)} | {feedback.overall_score:.1f}/20 |"
+          f" {d.content}/5 | {d.structure}/5 | {d.language:.1f}/5 |"
+          f" {d.handwriting}/5 |"
+      )
+    lines.append("")
+    lines.append("## Submission Details")
+    for index, feedback in enumerate(profile.feedback_items, start=1):
+      d = feedback.dimensions
+      lines.extend([
+          "",
+          f"### {index}. {feedback.filename}",
+          "",
+          "#### Score Breakdown",
+          "| Overall | Content | Structure | Language | Handwriting |",
+          "| ---: | ---: | ---: | ---: | ---: |",
+          (
+              f"| {feedback.overall_score:.1f}/20 | {d.content}/5 |"
+              f" {d.structure}/5 | {d.language:.1f}/5 | {d.handwriting}/5 |"
+          ),
+          "",
+          "#### 题目",
+          feedback.prompt_summary,
+          "",
+          "#### 优点",
+      ])
+      for strength in feedback.strengths:
+        lines.append(f"- {strength}")
+      lines.append("")
+      lines.append("#### 改进建议")
+      for improvement in feedback.improvements:
+        lines.append(f"- {improvement}")
+      lines.extend([
+          "",
+          "#### 原文",
+          "```text",
+      ])
+      lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
+      lines.append("```")
+      model_essay = feedback.model_essay.strip()
+      if model_essay:
+        lines.extend([
+            "",
+            "#### 范文",
+            "```text",
+        ])
+        lines.extend(model_essay.splitlines() or [model_essay])
+        lines.append("```")
+      lines.append("")
+
+  lines.extend([
+      "## Grammar Training Mistakes",
+      "| Skill | Original | Correct | Explanation |",
+      "| --- | --- | --- | --- |",
+  ])
+  grammar_rows = 0
+  for training in profile.grammar_trainings:
+    for mistake in training.mistakes:
+      grammar_rows += 1
+      lines.append(
+          f"| {_markdown_cell(mistake.skill_tag)} |"
+          f" {_markdown_cell(mistake.original_answer)} |"
+          f" {_markdown_cell(mistake.correct_answer)} |"
+          f" {_markdown_cell(mistake.explanation)} |"
+      )
+  if grammar_rows == 0:
+    lines.append("| - | - | - | - |")
+  lines.append("")
+
+  lines.extend([
+      "## Personalized Training Input",
+      "| Source | Skill | Evidence | Suggested Fix | Explanation |",
+      "| --- | --- | --- | --- | --- |",
+  ])
+  for need in profile.learning_needs:
+    lines.append(
+        f"| {_markdown_cell(need.source_type)} |"
+        f" {_markdown_cell(need.skill_tag)} |"
+        f" {_markdown_cell(need.evidence)} |"
+        f" {_markdown_cell(need.suggested_fix)} |"
+        f" {_markdown_cell(need.explanation)} |"
+    )
+  if not profile.learning_needs:
+    lines.append("| - | - | - | - | - |")
+
+  if profile.skipped:
+    lines.extend(["", "## Skipped Images"])
+    for skipped in profile.skipped:
+      lines.append(f"- {skipped}")
+
+  return frontmatter_lines, lines
+
+
 def write_report(
     node_input: list[StudentLearningProfile] | list[dict[str, object]],
 ):
@@ -1266,7 +1430,7 @@ def write_report(
   session_sections: list[list[str]] = []
   for profile in profiles:
     student = profile.student_name or "unknown"
-    safe_student = _safe_name(student)
+    safe_student = _safe_filename_segment(student)
     report_path = REPORTS_DIR / f"{safe_student}_{file_ts}.md"
     training_path = TRAINING_INPUTS_DIR / f"{safe_student}_{file_ts}.json"
     training_path.write_text(
@@ -1279,142 +1443,19 @@ def write_report(
         encoding="utf-8",
     )
 
-    frontmatter_lines: list[str] = [
-        "---",
-        "schema_version: 2",
-        f"report_type: {_yaml_string('student_learning_profile')}",
-        f"student: {_yaml_string(student)}",
-        f"feedback_language: {_yaml_string(profile.feedback_language)}",
-        f"generated_at: {_yaml_string(display_ts)}",
-        f"submission_count: {len(profile.feedback_items)}",
-        f"grammar_training_count: {len(profile.grammar_trainings)}",
-        f"learning_need_count: {len(profile.learning_needs)}",
-        f"training_input_json: {_yaml_string(str(training_path))}",
-        "---",
-    ]
-
-    lines: list[str] = [
-        "",
-        "# Student Learning Profile",
-        "",
-        "## Report Info",
-        "| Field | Value |",
-        "| --- | --- |",
-        f"| Student | {_markdown_cell(student)} |",
-        f"| Feedback Language | {_markdown_cell(profile.feedback_language)} |",
-        f"| Feedback At | {_markdown_cell(display_ts)} |",
-        f"| Writing Submissions | {len(profile.feedback_items)} |",
-        f"| Grammar Trainings | {len(profile.grammar_trainings)} |",
-        f"| Learning Needs | {len(profile.learning_needs)} |",
-        f"| Training JSON | {_markdown_cell(training_path)} |",
-        "",
-    ]
-
-    if profile.feedback_items:
-      lines.extend([
-          "## Score Summary",
-          "| Submission | Overall | Content | Structure | Language | Handwriting |",
-          "| --- | ---: | ---: | ---: | ---: | ---: |",
-      ])
-      for feedback in profile.feedback_items:
-        d = feedback.dimensions
-        lines.append(
-            f"| {_markdown_cell(feedback.filename)} | {feedback.overall_score:.1f}/20 |"
-            f" {d.content}/5 | {d.structure}/5 | {d.language:.1f}/5 |"
-            f" {d.handwriting}/5 |"
-        )
-      lines.append("")
-      lines.append("## Submission Details")
-      for index, feedback in enumerate(profile.feedback_items, start=1):
-        d = feedback.dimensions
-        lines.extend([
-            "",
-            f"### {index}. {feedback.filename}",
-            "",
-            "#### Score Breakdown",
-            "| Overall | Content | Structure | Language | Handwriting |",
-            "| ---: | ---: | ---: | ---: | ---: |",
-            (
-                f"| {feedback.overall_score:.1f}/20 | {d.content}/5 |"
-                f" {d.structure}/5 | {d.language:.1f}/5 | {d.handwriting}/5 |"
-            ),
-            "",
-            "#### 题目",
-            feedback.prompt_summary,
-            "",
-            "#### 优点",
-        ])
-        for strength in feedback.strengths:
-          lines.append(f"- {strength}")
-        lines.append("")
-        lines.append("#### 改进建议")
-        for improvement in feedback.improvements:
-          lines.append(f"- {improvement}")
-        lines.extend([
-            "",
-            "#### 原文",
-            "```text",
-        ])
-        lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
-        lines.append("```")
-        model_essay = feedback.model_essay.strip()
-        if model_essay:
-          lines.extend([
-              "",
-              "#### 范文",
-              "```text",
-          ])
-          lines.extend(model_essay.splitlines() or [model_essay])
-          lines.append("```")
-        lines.append("")
-
-    lines.extend([
-        "## Grammar Training Mistakes",
-        "| Skill | Original | Correct | Explanation |",
-        "| --- | --- | --- | --- |",
-    ])
-    grammar_rows = 0
-    for training in profile.grammar_trainings:
-      for mistake in training.mistakes:
-        grammar_rows += 1
-        lines.append(
-            f"| {_markdown_cell(mistake.skill_tag)} |"
-            f" {_markdown_cell(mistake.original_answer)} |"
-            f" {_markdown_cell(mistake.correct_answer)} |"
-            f" {_markdown_cell(mistake.explanation)} |"
-        )
-    if grammar_rows == 0:
-      lines.append("| - | - | - | - |")
-    lines.append("")
-
-    lines.extend([
-        "## Personalized Training Input",
-        "| Source | Skill | Evidence | Suggested Fix | Explanation |",
-        "| --- | --- | --- | --- | --- |",
-    ])
-    for need in profile.learning_needs:
-      lines.append(
-          f"| {_markdown_cell(need.source_type)} |"
-          f" {_markdown_cell(need.skill_tag)} |"
-          f" {_markdown_cell(need.evidence)} |"
-          f" {_markdown_cell(need.suggested_fix)} |"
-          f" {_markdown_cell(need.explanation)} |"
-      )
-    if not profile.learning_needs:
-      lines.append("| - | - | - | - | - |")
-
-    if profile.skipped:
-      lines.extend(["", "## Skipped Images"])
-      for skipped in profile.skipped:
-        lines.append(f"- {skipped}")
+    frontmatter_lines, body_lines = _render_profile_markdown(
+        profile,
+        display_ts=display_ts,
+        training_path=training_path,
+    )
 
     report_path.write_text(
-        "\n".join(frontmatter_lines + lines) + "\n", encoding="utf-8"
+        "\n".join(frontmatter_lines + body_lines) + "\n", encoding="utf-8"
     )
     written.extend([report_path, training_path])
-    session_sections.append(lines)
+    session_sections.append(body_lines)
     try:
-      pdf_path = export_report_pdf(report_path, output_dir=REPORTS_DIR / "pdf_exports")
+      pdf_path = export_report_pdf(report_path, output_dir=PDF_EXPORTS_DIR)
     except PdfExportError as exc:
       pdf_warnings.append(f"{report_path.name}: {exc}")
     else:
@@ -1440,9 +1481,7 @@ def write_report(
     session_path.write_text("\n".join(session_lines) + "\n", encoding="utf-8")
     written.append(session_path)
     try:
-      session_pdf = export_report_pdf(
-          session_path, output_dir=REPORTS_DIR / "pdf_exports"
-      )
+      session_pdf = export_report_pdf(session_path, output_dir=PDF_EXPORTS_DIR)
     except PdfExportError as exc:
       pdf_warnings.append(f"{session_path.name}: {exc}")
     else:

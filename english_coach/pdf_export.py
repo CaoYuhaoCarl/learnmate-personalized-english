@@ -12,10 +12,12 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-PACKAGE_DIR = Path(__file__).parent
-REPORTS_DIR = PACKAGE_DIR / "reports"
+from .constants import PDF_EXPORTS_DIR
+from .constants import PACKAGE_DIR
+from .constants import REPORTS_DIR
+
 DEFAULT_CSS_PATH = PACKAGE_DIR / "report_print.css"
-DEFAULT_OUTPUT_DIR = REPORTS_DIR / "pdf_exports"
+DEFAULT_OUTPUT_DIR = PDF_EXPORTS_DIR
 WPS_BUNDLE_ID = "com.kingsoft.wpsoffice.mac"
 
 

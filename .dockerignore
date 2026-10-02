@@ -23,9 +23,6 @@ temp
 *.log
 graphify-out
 
-web/node_modules
-web/dist
-
 english_coach/input/*
 !english_coach/input/.gitignore
 english_coach/reports
