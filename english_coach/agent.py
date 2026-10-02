@@ -1264,6 +1264,139 @@ def _markdown_cell(value: object) -> str:
   return str(value).replace("\n", "<br>").replace("|", "\\|")
 
 
+def _i18n_report(key: str, lang: FeedbackLanguage) -> str:
+  """Return localized report section heading or label."""
+  translations = {
+      "title": {
+          "zh-Hans": "学生学习档案",
+          "en": "Student Learning Profile",
+          "ja": "学習プロファイル",
+          "ko": "학습 프로필",
+      },
+      "score_summary": {
+          "zh-Hans": "分数汇总",
+          "en": "Score Summary",
+          "ja": "スコアサマリー",
+          "ko": "점수 요약",
+      },
+      "submission_details": {
+          "zh-Hans": "作业详情",
+          "en": "Submission Details",
+          "ja": "提出物の詳細",
+          "ko": "제출 세부사항",
+      },
+      "score_breakdown": {
+          "zh-Hans": "分数明细",
+          "en": "Score Breakdown",
+          "ja": "スコア内訳",
+          "ko": "점수 세부내역",
+      },
+      "prompt": {
+          "zh-Hans": "题目",
+          "en": "Prompt",
+          "ja": "課題",
+          "ko": "주제",
+      },
+      "strengths": {
+          "zh-Hans": "优点",
+          "en": "Strengths",
+          "ja": "良い点",
+          "ko": "장점",
+      },
+      "improvements": {
+          "zh-Hans": "改进建议",
+          "en": "Areas for Improvement",
+          "ja": "改善点",
+          "ko": "개선 사항",
+      },
+      "original": {
+          "zh-Hans": "原文",
+          "en": "Original Text",
+          "ja": "原文",
+          "ko": "원문",
+      },
+      "model_essay": {
+          "zh-Hans": "范文",
+          "en": "Model Essay",
+          "ja": "模範解答",
+          "ko": "모범 답안",
+      },
+      "grammar_training": {
+          "zh-Hans": "语法训练错题",
+          "en": "Grammar Training Mistakes",
+          "ja": "文法トレーニング誤答",
+          "ko": "문법 훈련 오답",
+      },
+      "training_input": {
+          "zh-Hans": "个性化训练建议",
+          "en": "Personalized Training Input",
+          "ja": "パーソナライズトレーニング",
+          "ko": "맞춤형 훈련 제안",
+      },
+      "no_grammar_data": {
+          "zh-Hans": "暂无语法训练数据",
+          "en": "No grammar training data yet",
+          "ja": "文法トレーニングデータなし",
+          "ko": "아직 문법 훈련 데이터 없음",
+      },
+      "no_training_needs": {
+          "zh-Hans": "暂无训练建议",
+          "en": "No training recommendations yet",
+          "ja": "トレーニング提案なし",
+          "ko": "아직 훈련 제안 없음",
+      },
+      "col_submission": {
+          "zh-Hans": "作业",
+          "en": "Submission",
+          "ja": "提出物",
+          "ko": "제출물",
+      },
+      "col_skill": {
+          "zh-Hans": "技能点",
+          "en": "Skill",
+          "ja": "スキル",
+          "ko": "기술",
+      },
+      "col_original": {
+          "zh-Hans": "原答案",
+          "en": "Original",
+          "ja": "元の解答",
+          "ko": "원래 답",
+      },
+      "col_correct": {
+          "zh-Hans": "正确答案",
+          "en": "Correct",
+          "ja": "正解",
+          "ko": "정답",
+      },
+      "col_explanation": {
+          "zh-Hans": "解释",
+          "en": "Explanation",
+          "ja": "説明",
+          "ko": "설명",
+      },
+      "col_source": {
+          "zh-Hans": "来源",
+          "en": "Source",
+          "ja": "ソース",
+          "ko": "출처",
+      },
+      "col_evidence": {
+          "zh-Hans": "原文",
+          "en": "Evidence",
+          "ja": "証拠",
+          "ko": "근거",
+      },
+      "col_fix": {
+          "zh-Hans": "改进方向",
+          "en": "Suggested Fix",
+          "ja": "改善案",
+          "ko": "개선 방향",
+      },
+  }
+  return translations.get(key, {}).get(lang, translations[key]["en"])
+
+
 def _render_profile_markdown(
     profile: StudentLearningProfile,
     *,
@@ -1274,6 +1407,7 @@ def _render_profile_markdown(
 
   Returns (frontmatter_lines, body_lines)."""
   student = profile.student_name or "unknown"
+  lang = profile.feedback_language
 
   frontmatter_lines: list[str] = [
       "---",
@@ -1291,25 +1425,15 @@ def _render_profile_markdown(
 
   lines: list[str] = [
       "",
-      "# Student Learning Profile",
-      "",
-      "## Report Info",
-      "| Field | Value |",
-      "| --- | --- |",
-      f"| Student | {_markdown_cell(student)} |",
-      f"| Feedback Language | {_markdown_cell(profile.feedback_language)} |",
-      f"| Feedback At | {_markdown_cell(display_ts)} |",
-      f"| Writing Submissions | {len(profile.feedback_items)} |",
-      f"| Grammar Trainings | {len(profile.grammar_trainings)} |",
-      f"| Learning Needs | {len(profile.learning_needs)} |",
-      f"| Training JSON | {_markdown_cell(training_path)} |",
+      f"# {_i18n_report('title', lang)}",
       "",
   ]
 
-  if profile.feedback_items:
+  # Only show Score Summary if there are multiple submissions
+  if len(profile.feedback_items) > 1:
     lines.extend([
-        "## Score Summary",
-        "| Submission | Overall | Content | Structure | Language | Handwriting |",
+        f"## {_i18n_report('score_summary', lang)}",
+        f"| {_i18n_report('col_submission', lang)} | Overall | Content | Structure | Language | Handwriting |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ])
     for feedback in profile.feedback_items:
@@ -1320,14 +1444,16 @@ def _render_profile_markdown(
           f" {d.handwriting}/5 |"
       )
     lines.append("")
-    lines.append("## Submission Details")
+
+  if profile.feedback_items:
+    lines.append(f"## {_i18n_report('submission_details', lang)}")
     for index, feedback in enumerate(profile.feedback_items, start=1):
       d = feedback.dimensions
       lines.extend([
           "",
           f"### {index}. {feedback.filename}",
           "",
-          "#### Score Breakdown",
+          f"#### {_i18n_report('score_breakdown', lang)}",
           "| Overall | Content | Structure | Language | Handwriting |",
           "| ---: | ---: | ---: | ---: | ---: |",
           (
@@ -1335,20 +1461,20 @@ def _render_profile_markdown(
               f" {d.structure}/5 | {d.language:.1f}/5 | {d.handwriting}/5 |"
           ),
           "",
-          "#### 题目",
+          f"#### {_i18n_report('prompt', lang)}",
           feedback.prompt_summary,
           "",
-          "#### 优点",
+          f"#### {_i18n_report('strengths', lang)}",
       ])
       for strength in feedback.strengths:
         lines.append(f"- {strength}")
       lines.append("")
-      lines.append("#### 改进建议")
+      lines.append(f"#### {_i18n_report('improvements', lang)}")
       for improvement in feedback.improvements:
         lines.append(f"- {improvement}")
       lines.extend([
           "",
-          "#### 原文",
+          f"#### {_i18n_report('original', lang)}",
           "```text",
       ])
       lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
@@ -1357,7 +1483,7 @@ def _render_profile_markdown(
       if model_essay:
         lines.extend([
             "",
-            "#### 范文",
+            f"#### {_i18n_report('model_essay', lang)}",
             "```text",
         ])
         lines.extend(model_essay.splitlines() or [model_essay])
@@ -1365,8 +1491,8 @@ def _render_profile_markdown(
       lines.append("")
 
   lines.extend([
-      "## Grammar Training Mistakes",
-      "| Skill | Original | Correct | Explanation |",
+      f"## {_i18n_report('grammar_training', lang)}",
+      f"| {_i18n_report('col_skill', lang)} | {_i18n_report('col_original', lang)} | {_i18n_report('col_correct', lang)} | {_i18n_report('col_explanation', lang)} |",
       "| --- | --- | --- | --- |",
   ])
   grammar_rows = 0
@@ -1380,12 +1506,12 @@ def _render_profile_markdown(
           f" {_markdown_cell(mistake.explanation)} |"
       )
   if grammar_rows == 0:
-    lines.append("| - | - | - | - |")
+    lines.append(f"| {_i18n_report('no_grammar_data', lang)} | | | |")
   lines.append("")
 
   lines.extend([
-      "## Personalized Training Input",
-      "| Source | Skill | Evidence | Suggested Fix | Explanation |",
+      f"## {_i18n_report('training_input', lang)}",
+      f"| {_i18n_report('col_source', lang)} | {_i18n_report('col_skill', lang)} | {_i18n_report('col_evidence', lang)} | {_i18n_report('col_fix', lang)} | {_i18n_report('col_explanation', lang)} |",
       "| --- | --- | --- | --- | --- |",
   ])
   for need in profile.learning_needs:
@@ -1397,7 +1523,7 @@ def _render_profile_markdown(
         f" {_markdown_cell(need.explanation)} |"
     )
   if not profile.learning_needs:
-    lines.append("| - | - | - | - | - |")
+    lines.append(f"| {_i18n_report('no_training_needs', lang)} | | | | |")
 
   if profile.skipped:
     lines.extend(["", "## Skipped Images"])
