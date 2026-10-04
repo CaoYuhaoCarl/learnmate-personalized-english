@@ -8,8 +8,9 @@ extractor. After extraction, recognized input images are automatically renamed
 in their original folder as `Student_YYYY-MM-DD.ext` using the visible student
 name and image date. It writes per-student Markdown reports to `./reports/` and
 machine-readable personalized training inputs to `./training_inputs/`. When
-`pandoc` and `wkhtmltopdf` are available, each Markdown report is also exported
-to `./reports/pdf_exports/`.
+`pandoc` and `weasyprint` are available, each Markdown report is also exported
+to `./reports/pdf_exports/`. At the end of a run on macOS, the combined session
+PDF opens automatically in WPS Office when the app is installed.
 
 Local ADK usage: from the *parent* directory of this folder, run `adk web` and
 pick `english_coach` in the app dropdown. (`adk web` discovers apps as
@@ -35,10 +36,15 @@ In ADK Web, attach one or more supported image files to the message and ask the
 agent to process them. Uploaded images are staged under `./input/uploads/` and
 then use the same processing path as local `./input/` files.
 
-PDF export requires `pandoc` and `wkhtmltopdf` to be installed on the computer.
-On macOS, install `pandoc` with `brew install pandoc`, then install
-`wkhtmltopdf` from <https://wkhtmltopdf.org/downloads.html>. From the repository
-root, run `make check-tools` to confirm both commands are available.
+PDF export requires the `pandoc` and `weasyprint` system command-line tools,
+installed separately from the Python requirements. On macOS:
+
+```bash
+brew install pandoc weasyprint
+```
+
+From the repository root, run `make check-tools` to confirm both commands can
+run. The Docker image installs both tools and Chinese fonts for Linux deployment.
 
 Manual PDF export from the repository root:
 

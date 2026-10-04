@@ -763,9 +763,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
         old_reports_dir = coach_agent.REPORTS_DIR
         old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
             coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
             try:
                 def fake_export(report_path, output_dir):
                     pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
@@ -790,6 +792,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             finally:
                 coach_agent.REPORTS_DIR = old_reports_dir
                 coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         self.assertEqual(len(events), 1)
         self.assertEqual(export_mock.call_count, 2)
@@ -810,8 +813,8 @@ class EnglishCoachAgentTest(unittest.TestCase):
             "During the winter holiday, I will study every day and travel with my family.",
             report_text,
         )
-        self.assertIn("## Grammar Training Mistakes", report_text)
-        self.assertIn("## Personalized Training Input", report_text)
+        self.assertIn("## 语法训练错题", report_text)
+        self.assertIn("## 个性化训练建议", report_text)
         self.assertEqual(payload["student_name"], "Eve")
         self.assertNotIn("model_essay", payload["feedback_items"][0])
         self.assertEqual(payload["learning_needs"][0]["skill_tag"], "past_tense")
@@ -837,9 +840,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
         old_reports_dir = coach_agent.REPORTS_DIR
         old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
             coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
             try:
                 def fake_export(report_path, output_dir):
                     pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
@@ -864,6 +869,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             finally:
                 coach_agent.REPORTS_DIR = old_reports_dir
                 coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         # One PDF per student plus a single combined session PDF.
         self.assertEqual(export_mock.call_count, 3)
@@ -878,7 +884,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             session_text.count('<div style="page-break-before: always;"></div>'),
             1,
         )
-        self.assertEqual(session_text.count("# Student Learning Profile"), 2)
+        self.assertEqual(session_text.count("# 学生学习档案"), 2)
         message = events[0].message.parts[0].text
         self.assertIn(f"/reports/{session_pdf.name}", message)
 
@@ -894,9 +900,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
         old_reports_dir = coach_agent.REPORTS_DIR
         old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
             coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
             try:
                 with mock.patch.object(
                     coach_agent,
@@ -911,6 +919,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             finally:
                 coach_agent.REPORTS_DIR = old_reports_dir
                 coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         self.assertTrue(report_exists)
         self.assertTrue(payload_exists)
@@ -929,9 +938,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
         old_reports_dir = coach_agent.REPORTS_DIR
         old_training_dir = coach_agent.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
             coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
             try:
                 def fake_export(report_path, output_dir):
                     pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
@@ -956,6 +967,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             finally:
                 coach_agent.REPORTS_DIR = old_reports_dir
                 coach_agent.TRAINING_INPUTS_DIR = old_training_dir
+                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         open_mock.assert_called_once_with(session_pdf)
         self.assertTrue(session_pdf_exists)
@@ -1057,9 +1069,9 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertIn(str(markdown), command)
         self.assertIn(f"--css={css}", command)
         self.assertIn("--pdf-engine", command)
-        self.assertIn("/tools/wkhtmltopdf", command)
-        self.assertIn("--pdf-engine-opt=--enable-local-file-access", command)
-        self.assertIn("--pdf-engine-opt=A4", command)
+        self.assertIn("/tools/weasyprint", command)
+        self.assertIn("--to=html5", command)
+        self.assertFalse(any(arg.startswith("--pdf-engine-opt=") for arg in command))
         self.assertIn(str(pdf_path), command)
         self.assertTrue(output_dir_exists)
         self.assertTrue(run_mock.call_args.kwargs["check"])
@@ -1119,7 +1131,28 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 with self.assertRaises(pdf_export.PdfExportError) as error:
                     pdf_export.export_report_pdf(markdown, css_path=css)
 
-        self.assertIn("wkhtmltopdf", str(error.exception))
+        self.assertIn("weasyprint", str(error.exception))
+        self.assertIn("brew install pandoc weasyprint", str(error.exception))
+
+    def test_export_report_pdf_reports_tool_launch_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "Eve.md"
+            css = root / "report_print.css"
+            markdown.write_text("# Student Learning Profile\n", encoding="utf-8")
+            css.write_text("@page { size: A4; }\n", encoding="utf-8")
+            with mock.patch.object(pdf_export.shutil, "which", return_value="/tools/tool"):
+                with mock.patch.object(
+                    pdf_export.subprocess,
+                    "run",
+                    side_effect=OSError("Permission denied"),
+                ):
+                    with self.assertRaises(pdf_export.PdfExportError) as error:
+                        pdf_export.export_report_pdf(
+                            markdown, output_dir=root / "pdf_exports", css_path=css
+                        )
+
+        self.assertIn("Permission denied", str(error.exception))
 
     def test_export_report_pdf_reports_missing_output_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

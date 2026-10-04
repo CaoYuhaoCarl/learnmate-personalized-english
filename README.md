@@ -15,14 +15,15 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-PDF export also needs two system command-line tools:
+PDF export also needs the `pandoc` and `weasyprint` system command-line tools.
+On macOS, install them with Homebrew:
 
 ```bash
-brew install pandoc
+brew install pandoc weasyprint
 ```
 
-Install `wkhtmltopdf` from the macOS package at
-<https://wkhtmltopdf.org/downloads.html>, then verify both tools are available:
+These tools are installed separately from the Python requirements. Verify that
+both commands can run:
 
 ```bash
 make check-tools
@@ -43,7 +44,8 @@ images under `english_coach/input/uploads/`, renames recognized inputs as
 `Student_YYYY-MM-DD.ext`, writes markdown reports under `english_coach/reports/`
 plus training JSON under `english_coach/training_inputs/`. PDF copies are
 exported automatically under `english_coach/reports/pdf_exports/` when `pandoc`
-and `wkhtmltopdf` are available.
+and `weasyprint` are available. At the end of a run on macOS, the combined
+session PDF also opens automatically in WPS Office when the app is installed.
 
 Open <http://127.0.0.1:8080/reports> to view, print, or download generated
 PDFs. The default username is `teacher`; use `REPORTS_USERNAME` to override it.

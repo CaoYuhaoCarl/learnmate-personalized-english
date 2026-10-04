@@ -6,6 +6,6 @@ pdf:
 	python3 -m english_coach.pdf_export --date "$(DATE)"
 
 check-tools:
-	@command -v pandoc >/dev/null || { echo "Missing pandoc. Install it with: brew install pandoc"; exit 1; }
-	@command -v wkhtmltopdf >/dev/null || { echo "Missing wkhtmltopdf. Install it from: https://wkhtmltopdf.org/downloads.html"; exit 1; }
-	@echo "PDF export tools are installed."
+	@pandoc --version >/dev/null 2>&1 || { echo "pandoc is missing or cannot run. On macOS, install it with: brew install pandoc"; exit 1; }
+	@weasyprint --version >/dev/null 2>&1 || { echo "WeasyPrint is missing or cannot run. On macOS, install it with: brew install weasyprint"; exit 1; }
+	@echo "PDF export tools are installed and runnable."

@@ -5,7 +5,7 @@
 
 html {
   color: #1f2933;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   font-size: 12px;
   line-height: 1.45;
 }
@@ -66,6 +66,10 @@ table {
   width: 100%;
 }
 
+tr {
+  break-inside: avoid;
+}
+
 th,
 td {
   border: 1px solid #d9e2ec;
@@ -87,6 +91,7 @@ code {
 }
 
 pre {
+  break-inside: avoid;
   background: #f8fafc;
   border: 1px solid #d9e2ec;
   border-radius: 4px;

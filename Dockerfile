@@ -8,21 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-ARG WKHTMLTOX_DEB_URL="https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_amd64.deb"
-ARG WKHTMLTOX_SHA256="98ba0d157b50d36f23bd0dedf4c0aa28c7b0c50fcdcdc54aa5b6bbba81a3941d"
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
         fonts-noto-cjk \
         pandoc \
-        xfonts-75dpi \
-        xfonts-base \
-    && curl -fsSL "$WKHTMLTOX_DEB_URL" -o /tmp/wkhtmltox.deb \
-    && echo "$WKHTMLTOX_SHA256  /tmp/wkhtmltox.deb" | sha256sum -c - \
-    && apt-get install -y --no-install-recommends /tmp/wkhtmltox.deb \
-    && rm -f /tmp/wkhtmltox.deb \
+        weasyprint \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /usr/sbin/nologin appuser

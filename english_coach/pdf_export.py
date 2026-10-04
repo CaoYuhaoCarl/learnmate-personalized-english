@@ -33,8 +33,8 @@ def _require_tool(name: str) -> str:
     tool_path = shutil.which(name)
     if not tool_path:
         raise PdfExportError(
-            f"Missing required tool: {name}. Install pandoc and wkhtmltopdf "
-            "before exporting PDFs."
+            f"Missing required tool: {name}. On macOS, run: "
+            "brew install pandoc weasyprint, then run make check-tools."
         )
     return tool_path
 
@@ -88,7 +88,7 @@ def export_report_pdf(
         raise PdfExportError(f"PDF stylesheet not found: {css}")
 
     pandoc = _require_tool("pandoc")
-    wkhtmltopdf = _require_tool("wkhtmltopdf")
+    weasyprint = _require_tool("weasyprint")
 
     output.mkdir(parents=True, exist_ok=True)
     pdf_path = output / f"{markdown.stem}.pdf"
@@ -100,20 +100,10 @@ def export_report_pdf(
         str(markdown_for_command),
         "--from=gfm+yaml_metadata_block",
         "--standalone",
+        "--to=html5",
         f"--css={css_for_command}",
         "--pdf-engine",
-        wkhtmltopdf,
-        "--pdf-engine-opt=--enable-local-file-access",
-        "--pdf-engine-opt=--page-size",
-        "--pdf-engine-opt=A4",
-        "--pdf-engine-opt=--margin-top",
-        "--pdf-engine-opt=16mm",
-        "--pdf-engine-opt=--margin-right",
-        "--pdf-engine-opt=14mm",
-        "--pdf-engine-opt=--margin-bottom",
-        "--pdf-engine-opt=16mm",
-        "--pdf-engine-opt=--margin-left",
-        "--pdf-engine-opt=14mm",
+        weasyprint,
         "-o",
         str(pdf_for_command),
     ]
@@ -141,6 +131,8 @@ def export_report_pdf(
             if detail:
                 message = f"{message}: {detail}"
             raise PdfExportError(message) from exc
+        except OSError as exc:
+            raise PdfExportError(f"PDF export failed for {markdown}: {exc}") from exc
 
     if not pdf_path.is_file():
         raise PdfExportError(f"PDF export did not create output: {pdf_path}")
