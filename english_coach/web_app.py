@@ -1,33 +1,72 @@
-"""FastAPI entrypoint that adds teacher-friendly PDF report routes to ADK Web."""
+"""Authenticated teacher workspace, submission API, and existing ADK Web."""
 
 from __future__ import annotations
 
 import html
 import os
 import secrets
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Query
+from fastapi import Request
 from fastapi import status
 from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic
 from fastapi.security import HTTPBasicCredentials
+from starlette.requests import HTTPConnection
 from google.adk.cli.fast_api import get_fast_api_app
 from google.adk.cli.utils.agent_loader import AgentLoader
+from google.adk.cli.utils import envs
 
 from .constants import PDF_EXPORTS_DIRNAME
 from .constants import PROJECT_DIR
 from .constants import REPORTS_DIR
+from .submissions import Processor, SubmissionStore, UploadLimitMiddleware, read_upload
+from .reviews import read_review_request
 
 REPORTS_USERNAME_ENV = "REPORTS_USERNAME"
 REPORTS_PASSWORD_ENV = "REPORTS_PASSWORD"
 ADK_APP_NAME = "english_coach"
 
 security = HTTPBasic(auto_error=False)
+
+
+class WebSocketAuthMiddleware:
+    """ADK live sockets must share the HTTP app's authentication boundary."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            connection = HTTPConnection(scope)
+            try:
+                _require_reports_auth(await security(connection))
+                _check_origin(connection)
+            except HTTPException:
+                await send({"type": "websocket.close", "code": 1008})
+                return
+        await self.app(scope, receive, send)
+
+
+def _check_origin(connection: HTTPConnection):
+    origin = connection.headers.get("origin")
+    scheme = {"ws": "http", "wss": "https"}.get(connection.url.scheme, connection.url.scheme)
+    try:
+        cross_origin = origin and (urlsplit(origin).scheme, urlsplit(origin).netloc) != (scheme, connection.url.netloc)
+    except ValueError:
+        cross_origin = True
+    if connection.headers.get("sec-fetch-site") == "cross-site" or cross_origin:
+        raise HTTPException(403, "请从本服务的页面提交请求。")
 
 
 class EnglishCoachAgentLoader(AgentLoader):
@@ -67,8 +106,8 @@ def _require_reports_auth(
             headers={"WWW-Authenticate": "Basic", **_no_store_headers()},
         )
 
-    valid_username = secrets.compare_digest(credentials.username, username)
-    valid_password = secrets.compare_digest(credentials.password, password)
+    valid_username = secrets.compare_digest(credentials.username.encode(), username.encode())
+    valid_password = secrets.compare_digest(credentials.password.encode(), password.encode())
     if not (valid_username and valid_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -103,19 +142,29 @@ def _resolve_pdf(reports_dir: Path, filename: str) -> Path:
     return pdf_path
 
 
-def _reports_html(reports_dir: Path) -> str:
-    reports = _pdf_reports(reports_dir)
+def _reports_html(reports_dir: Path, store: SubmissionStore | None = None) -> str:
+    reports = [
+        (report.stat().st_mtime, f"历史结果（未经教师确认）· {report.name}", f"/reports/{quote(report.name, safe='')}")
+        for report in _pdf_reports(reports_dir)
+    ]
+    if store is not None:
+        for submission in store.recent(limit=None):
+            for report in submission["reports"] + submission.get("historical_reports", []):
+                reports.append((datetime.fromisoformat(submission["created_at"]).timestamp(),
+                                f'{report["title"]} · {report["filename"]}', report["url"]))
+    reports.sort(key=lambda report: report[0], reverse=True)
     if not reports:
         body = "<p>No PDF reports yet.</p>"
     else:
         rows = []
-        for report in reports:
-            filename = html.escape(report.name)
+        for _, title, url in reports:
+            filename = html.escape(title)
+            url = html.escape(url, quote=True)
             rows.append(
                 "<tr>"
                 f"<td>{filename}</td>"
-                f'<td><a href="/reports/{filename}">View / Print</a></td>'
-                f'<td><a href="/reports/{filename}?download=1">Download</a></td>'
+                f'<td><a href="{url}">View / Print</a></td>'
+                f'<td><a href="{url}?download=1">Download</a></td>'
                 "</tr>"
             )
         body = (
@@ -145,6 +194,7 @@ def _reports_html(reports_dir: Path) -> str:
         "</style>"
         "</head>"
         "<body>"
+        '<p><a href="/">← 返回教师工作台</a></p>'
         "<h1>PDF Reports</h1>"
         f"{body}"
         "</body>"
@@ -152,10 +202,11 @@ def _reports_html(reports_dir: Path) -> str:
     )
 
 
-def attach_report_routes(app: FastAPI, *, reports_dir: Path = REPORTS_DIR) -> FastAPI:
+def attach_report_routes(app: FastAPI, *, reports_dir: Path = REPORTS_DIR,
+                         store: SubmissionStore | None = None) -> FastAPI:
     @app.get("/reports", response_class=HTMLResponse)
     def list_reports(_auth: None = Depends(_require_reports_auth)) -> HTMLResponse:
-        return HTMLResponse(_reports_html(reports_dir), headers=_no_store_headers())
+        return HTMLResponse(_reports_html(reports_dir, store), headers=_no_store_headers())
 
     @app.get("/reports/{filename}")
     def open_report(
@@ -176,8 +227,81 @@ def attach_report_routes(app: FastAPI, *, reports_dir: Path = REPORTS_DIR) -> Fa
     return app
 
 
-def create_app() -> FastAPI:
-    app = get_fast_api_app(
+def attach_teacher_routes(app: FastAPI, store: SubmissionStore) -> None:
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/teacher-assets", StaticFiles(directory=static_dir), name="teacher-assets")
+
+    @app.get("/", response_class=HTMLResponse)
+    def teacher_home():
+        return FileResponse(static_dir / "teacher.html", media_type="text/html", headers=_no_store_headers())
+
+    @app.post("/api/submissions")
+    async def submit(request: Request):
+        identifier, language, files = await read_upload(request)
+        record, created = store.submit(identifier, language, files)
+        return JSONResponse(record, status_code=202 if created else 200, headers=_no_store_headers())
+
+    @app.get("/api/submissions")
+    def recent_submissions():
+        return JSONResponse({"submissions": store.recent()}, headers=_no_store_headers())
+
+    @app.get("/api/submissions/{identifier}")
+    def submission(identifier: str):
+        return JSONResponse(store.public(store.get(identifier)), headers=_no_store_headers())
+
+    @app.get("/api/submissions/{identifier}/review")
+    async def get_review(identifier: str):
+        return JSONResponse(store.reviews.get(identifier), headers=_no_store_headers())
+
+    @app.put("/api/submissions/{identifier}/review")
+    async def save_review(identifier: str, request: Request):
+        payload = await read_review_request(request, save=True)
+        return JSONResponse(store.reviews.save(identifier, payload), headers=_no_store_headers())
+
+    @app.post("/api/submissions/{identifier}/review/confirm")
+    async def confirm_review(identifier: str, request: Request):
+        payload = await read_review_request(request)
+        return JSONResponse(store.reviews.confirm(identifier, payload), status_code=202, headers=_no_store_headers())
+
+    @app.post("/api/submissions/{identifier}/review/export")
+    async def retry_review_export(identifier: str, request: Request):
+        payload = await read_review_request(request)
+        return JSONResponse(store.reviews.retry(identifier, payload), status_code=202, headers=_no_store_headers())
+
+    @app.get("/api/submissions/{identifier}/images/{input_id}")
+    async def review_image(identifier: str, input_id: str):
+        path, mime = store.reviews.image(identifier, input_id)
+        return FileResponse(path, media_type=mime, headers=_no_store_headers())
+
+    @app.get("/api/submissions/{identifier}/revisions/{revision}")
+    async def review_snapshot(identifier: str, revision: int):
+        return JSONResponse(store.reviews.snapshot(identifier, revision), headers=_no_store_headers())
+
+    @app.get("/api/submissions/{identifier}/revisions/{revision}/reports/{filename}")
+    async def review_report(identifier: str, revision: int, filename: str, download: bool = Query(False)):
+        path = store.reviews.report_path(identifier, revision, filename)
+        return FileResponse(path, media_type="application/pdf", filename=path.name,
+                            content_disposition_type="attachment" if download else "inline",
+                            headers=_no_store_headers())
+
+    @app.get("/api/submissions/{identifier}/reports/{filename}")
+    def submission_report(identifier: str, filename: str, download: bool = Query(False)):
+        path = store.report_path(identifier, filename)
+        return FileResponse(path, media_type="application/pdf", filename=path.name,
+                            content_disposition_type="attachment" if download else "inline",
+                            headers=_no_store_headers())
+
+
+def create_app(*, data_dir: Path | None = None, processor: Processor | None = None,
+               include_adk: bool = True) -> FastAPI:
+    from .submission_runner import process_submission
+
+    envs.load_dotenv_for_agent(ADK_APP_NAME, str(PROJECT_DIR))
+    store = SubmissionStore(
+        data_dir if data_dir is not None else Path(os.environ.get("LEARNMATE_WEB_DATA_DIR", str(REPORTS_DIR / "web"))),
+        processor or process_submission,
+    )
+    adk_app = get_fast_api_app(
         agents_dir=str(PROJECT_DIR),
         agent_loader=EnglishCoachAgentLoader(str(PROJECT_DIR)),
         session_service_uri="memory://",
@@ -186,8 +310,50 @@ def create_app() -> FastAPI:
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8080")),
         reload_agents=False,
-    )
-    return attach_report_routes(app)
+    ) if include_adk else None
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        store.start()
+        try:
+            if adk_app is not None:
+                async with adk_app.router.lifespan_context(adk_app):
+                    yield
+            else:
+                yield
+        finally:
+            await store.close()
+
+    app = FastAPI(title="LearnMate", lifespan=lifespan)
+    app.state.submissions = store
+    app.add_middleware(UploadLimitMiddleware)
+    app.add_middleware(WebSocketAuthMiddleware)
+
+    @app.middleware("http")
+    async def authenticate(request: Request, call_next):
+        try:
+            _require_reports_auth(await security(request))
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                _check_origin(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                                headers={**_no_store_headers(), **(exc.headers or {})})
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        if request.url.path == "/":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
+                "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+            )
+        return response
+
+    attach_teacher_routes(app, store)
+    attach_report_routes(app, store=store)
+    if adk_app is not None:
+        app.mount("/", adk_app)
+    return app
 
 
 app = create_app()

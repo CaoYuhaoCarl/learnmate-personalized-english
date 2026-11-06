@@ -132,8 +132,8 @@ class EnglishCoachWebAppTest(unittest.TestCase):
     def test_create_app_exposes_only_english_coach_adk_app(self):
         with mock.patch.dict(os.environ, {"REPORTS_PASSWORD": "secret"}, clear=True):
             client = TestClient(create_app())
-
-        response = client.get("/list-apps")
+            self.assertEqual(client.get("/list-apps").status_code, 401)
+            response = client.get("/list-apps", auth=("teacher", "secret"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), ["english_coach"])

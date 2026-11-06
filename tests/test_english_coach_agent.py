@@ -8,13 +8,17 @@ from unittest import mock
 
 from google.genai import types
 
-from english_coach import agent as coach_agent
+from english_coach import agents
+from english_coach import config
+from english_coach import schemas
+from english_coach import utils
+from english_coach import workflow
 from english_coach import pdf_export
 
 
 class EnglishCoachAgentTest(unittest.TestCase):
     def test_extractor_output_schema_excludes_score_fields(self):
-        fields = set(coach_agent.extractor.output_schema.model_fields)
+        fields = set(agents.extractor.output_schema.model_fields)
 
         self.assertIn("model_essay", fields)
         self.assertNotIn("filename", fields)
@@ -33,17 +37,17 @@ class EnglishCoachAgentTest(unittest.TestCase):
         for user_input, expected in examples.items():
             with self.subTest(user_input=user_input):
                 self.assertEqual(
-                    coach_agent._feedback_language_from_input(user_input),
+                    utils.feedback_language_from_input(user_input),
                     expected,
                 )
 
     def test_default_writing_inputs_dir_is_input(self):
-        self.assertEqual(coach_agent.WRITING_INPUTS_DIR.name, "input")
+        self.assertEqual(workflow.WRITING_INPUTS_DIR.name, "input")
 
     def test_list_writing_inputs_supports_phone_and_web_image_types(self):
-        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        old_inputs_dir = workflow.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            coach_agent.WRITING_INPUTS_DIR = Path(tmpdir)
+            workflow.WRITING_INPUTS_DIR = Path(tmpdir)
             try:
                 for filename in [
                     "a.png",
@@ -56,11 +60,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 ]:
                     (Path(tmpdir) / filename).write_bytes(b"fake image bytes")
 
-                items = coach_agent.list_writing_inputs(
+                items = workflow.list_writing_inputs(
                     "please use English feedback"
                 )
             finally:
-                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+                workflow.WRITING_INPUTS_DIR = old_inputs_dir
 
         self.assertEqual(
             [item["filename"] for item in items],
@@ -70,7 +74,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(items[4]["mime"], "image/heic")
 
     def test_list_writing_inputs_also_scans_tem_staging_dir(self):
-        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        old_inputs_dir = workflow.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             tem = root / "tem"
@@ -79,11 +83,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
             (tem / "staged.png").write_bytes(b"fake image bytes")
             (tem / "ignore.txt").write_text("nope", encoding="utf-8")
 
-            coach_agent.WRITING_INPUTS_DIR = root
+            workflow.WRITING_INPUTS_DIR = root
             try:
-                items = coach_agent.list_writing_inputs("")
+                items = workflow.list_writing_inputs("")
             finally:
-                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+                workflow.WRITING_INPUTS_DIR = old_inputs_dir
 
         self.assertEqual(
             [Path(item["path"]).name for item in items],
@@ -92,11 +96,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual([item["filename"] for item in items], ["top.jpg", "staged.png"])
 
     def test_list_writing_inputs_prefers_adk_web_uploaded_images(self):
-        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        old_inputs_dir = workflow.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "old.png").write_bytes(b"old image bytes")
-            coach_agent.WRITING_INPUTS_DIR = root
+            workflow.WRITING_INPUTS_DIR = root
             try:
                 message = types.Content(
                     role="user",
@@ -112,10 +116,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     ],
                 )
 
-                items = coach_agent.list_writing_inputs(message)
+                items = workflow.list_writing_inputs(message)
                 uploaded_bytes = Path(items[0]["path"]).read_bytes()
             finally:
-                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+                workflow.WRITING_INPUTS_DIR = old_inputs_dir
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["filename"], "Suzy_homework.png")
@@ -125,9 +129,9 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(Path(items[0]["path"]).parent.name, "uploads")
 
     def test_list_writing_inputs_keeps_multiple_uploaded_images(self):
-        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        old_inputs_dir = workflow.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            coach_agent.WRITING_INPUTS_DIR = Path(tmpdir)
+            workflow.WRITING_INPUTS_DIR = Path(tmpdir)
             try:
                 message = types.Content(
                     role="user",
@@ -150,12 +154,12 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     ],
                 )
 
-                items = coach_agent.list_writing_inputs(message)
+                items = workflow.list_writing_inputs(message)
                 uploaded_bytes = [
                     Path(item["path"]).read_bytes() for item in items
                 ]
             finally:
-                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+                workflow.WRITING_INPUTS_DIR = old_inputs_dir
 
         self.assertEqual(
             [item["filename"] for item in items],
@@ -168,11 +172,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(uploaded_bytes, [b"first image", b"second image"])
 
     def test_list_writing_inputs_ignores_non_image_uploads(self):
-        old_inputs_dir = coach_agent.WRITING_INPUTS_DIR
+        old_inputs_dir = workflow.WRITING_INPUTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "top.jpg").write_bytes(b"fake image bytes")
-            coach_agent.WRITING_INPUTS_DIR = root
+            workflow.WRITING_INPUTS_DIR = root
             try:
                 message = types.Content(
                     role="user",
@@ -188,44 +192,44 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     ],
                 )
 
-                items = coach_agent.list_writing_inputs(message)
+                items = workflow.list_writing_inputs(message)
             finally:
-                coach_agent.WRITING_INPUTS_DIR = old_inputs_dir
+                workflow.WRITING_INPUTS_DIR = old_inputs_dir
 
         self.assertEqual([item["filename"] for item in items], ["top.jpg"])
         self.assertEqual(items[0]["feedback_language"], "en")
 
     def test_submission_date_normalization_and_priority(self):
         self.assertEqual(
-            coach_agent._normalize_submission_date("Date: 2026.6.6"),
+            utils.normalize_submission_date("Date: 2026.6.6"),
             "2026-06-06",
         )
         self.assertEqual(
-            coach_agent._normalize_submission_date("2026/06/07"),
+            utils.normalize_submission_date("2026/06/07"),
             "2026-06-07",
         )
-        self.assertEqual(coach_agent._normalize_submission_date("2026-13-07"), "")
+        self.assertEqual(utils.normalize_submission_date("2026-13-07"), "")
         with mock.patch.object(
-            coach_agent,
-            "_default_submission_date",
+            utils,
+            "default_submission_date",
             return_value="2026-06-08",
         ):
             self.assertEqual(
-                coach_agent._resolve_submission_date(
+                utils.resolve_submission_date(
                     evidence_date="2026.6.6",
                     category_date="2026/6/5",
                 ),
                 "2026-06-06",
             )
             self.assertEqual(
-                coach_agent._resolve_submission_date(
+                utils.resolve_submission_date(
                     evidence_date="",
                     category_date="2026/6/5",
                 ),
                 "2026-06-05",
             )
             self.assertEqual(
-                coach_agent._resolve_submission_date(
+                utils.resolve_submission_date(
                     evidence_date="missing",
                     category_date="missing",
                 ),
@@ -234,8 +238,8 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
     def test_pick_input_route_emits_classifier_category(self):
         routes = list(
-            coach_agent.pick_input_route(
-                coach_agent.ImageCategory(
+            workflow.pick_input_route(
+                schemas.ImageCategory(
                     category="grammar_training",
                     student_name="Suzy",
                     confidence=0.91,
@@ -247,7 +251,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(routes[-1].actions.route, "grammar_training")
 
     def test_score_from_evidence_is_deterministic(self):
-        evidence = coach_agent.WritingEvidence(
+        evidence = schemas.WritingEvidence(
             student_name="Suzy",
             prompt_summary="Write about whether AI helps daily life.",
             transcription="AI helps me study. It help me plan. AI makes me happy.",
@@ -262,13 +266,13 @@ class EnglishCoachAgentTest(unittest.TestCase):
             improvements=["Fix grammar."],
         )
 
-        first = coach_agent._score_from_evidence(evidence)
-        second = coach_agent._score_from_evidence(evidence)
+        first = utils.score_from_evidence(evidence)
+        second = utils.score_from_evidence(evidence)
 
         self.assertEqual(first, second)
         self.assertEqual(
             first,
-            coach_agent.DimensionScores(
+            schemas.DimensionScores(
                 content=4,
                 structure=4,
                 language=4,
@@ -277,7 +281,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         )
 
     def test_writing_learning_needs_do_not_reuse_feedback_improvements(self):
-        evidence = coach_agent.WritingEvidence(
+        evidence = schemas.WritingEvidence(
             student_name="Suzy",
             prompt_summary="Write about helpful AI.",
             transcription="AI help me study. I like it.",
@@ -285,7 +289,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             required_points_total=3,
             grammar_errors=["AI help me"],
             grammar_error_fixes=[
-                coach_agent.WritingIssueFix(
+                schemas.WritingIssueFix(
                     error="AI help me",
                     suggested_fix="AI helps me",
                     explanation="Use helps with a singular subject.",
@@ -298,7 +302,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             strengths=["Clear main idea."],
             improvements=["Use subject-verb agreement."],
             writing_training_focuses=[
-                coach_agent.WritingTrainingFocus(
+                schemas.WritingTrainingFocus(
                     skill_tag="content_development",
                     evidence="The response gives only one brief idea.",
                     suggested_fix="Add one reason and one concrete example.",
@@ -307,7 +311,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             ],
         )
 
-        needs = coach_agent._writing_learning_needs(
+        needs = utils.writing_learning_needs(
             filename="Suzy_writing.png",
             student_name="Suzy",
             evidence=evidence,
@@ -390,7 +394,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 fake_context = FakeContext()
                 events = [
                     event
-                    async for event in coach_agent.process_one_input._func(
+                    async for event in workflow.process_one_input._func(
                         fake_context,
                         {
                             "path": str(image_path),
@@ -468,7 +472,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 fake_context = FakeContext()
                 events = [
                     event
-                    async for event in coach_agent.process_one_input._func(
+                    async for event in workflow.process_one_input._func(
                         fake_context,
                         {
                             "path": str(image_path),
@@ -495,8 +499,8 @@ class EnglishCoachAgentTest(unittest.TestCase):
     def test_task_for_attempt_adds_retry_nudge_only_after_first_attempt(self):
         base = "Classify this image before any grading or extraction."
 
-        self.assertEqual(coach_agent._task_for_attempt(base, 1), base)
-        nudged = coach_agent._task_for_attempt(base, 2)
+        self.assertEqual(utils.task_for_attempt(base, 1), base)
+        nudged = utils.task_for_attempt(base, 2)
         self.assertIn(base, nudged)
         self.assertIn("Retry attempt 2", nudged)
 
@@ -514,7 +518,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                             "Invalid JSON: EOF while parsing an object"
                         )
 
-                async for _ in coach_agent.process_one_input._func(
+                async for _ in workflow.process_one_input._func(
                     FakeContext(),
                     {
                         "path": str(image_path),
@@ -525,7 +529,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 ):
                     pass
 
-        with self.assertRaises(coach_agent.InputProcessingError):
+        with self.assertRaises(workflow.InputProcessingError):
             asyncio.run(run_process_one())
 
     def test_process_one_input_skips_input_after_final_attempt(self):
@@ -535,7 +539,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 image_path.write_bytes(b"fake image bytes")
 
                 class FakeContext:
-                    attempt_count = coach_agent._PROCESS_INPUT_MAX_ATTEMPTS
+                    attempt_count = config.PROCESS_INPUT_MAX_ATTEMPTS
 
                     async def run_node(self, node, node_input=None, **kwargs):
                         raise ValueError(
@@ -544,7 +548,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
                 events = [
                     event
-                    async for event in coach_agent.process_one_input._func(
+                    async for event in workflow.process_one_input._func(
                         FakeContext(),
                         {
                             "path": str(image_path),
@@ -570,21 +574,21 @@ class EnglishCoachAgentTest(unittest.TestCase):
             source.write_bytes(b"fake image bytes")
             existing = root / "Suzy_2026-06-06.JPG"
             existing.write_bytes(b"existing image bytes")
-            result = coach_agent.InputProcessingResult(
+            result = schemas.InputProcessingResult(
                 filename=source.name,
                 source_path=str(source),
                 category="writing",
                 student_name="Suzy",
                 submission_date="2026.6.6",
                 feedback_language="en",
-                feedback=coach_agent.EnglishCoachFeedback(
+                feedback=schemas.EnglishCoachFeedback(
                     filename=source.name,
                     student_name="Suzy",
                     feedback_language="en",
                     prompt_summary="Write about AI.",
                     transcription="AI help me.",
                     overall_score=17.0,
-                    dimensions=coach_agent.DimensionScores(
+                    dimensions=schemas.DimensionScores(
                         content=4,
                         structure=4,
                         language=5.0,
@@ -594,7 +598,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     improvements=["Use subject-verb agreement."],
                 ),
                 learning_needs=[
-                    coach_agent.LearningNeed(
+                    schemas.LearningNeed(
                         student_name="Suzy",
                         source_type="writing",
                         filename=source.name,
@@ -606,7 +610,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 ],
             )
 
-            events = list(coach_agent.rename_processed_inputs([result]))
+            events = list(workflow.rename_processed_inputs([result]))
             output = events[-1].output[0]
             renamed_path = root / "Suzy_2026-06-06_2.JPG"
 
@@ -626,7 +630,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "IMG_1001.JPG"
             source.write_bytes(b"fake image bytes")
-            result = coach_agent.InputProcessingResult(
+            result = schemas.InputProcessingResult(
                 filename=source.name,
                 source_path=str(source),
                 category="unsupported",
@@ -635,7 +639,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 skipped_reason="Unreadable.",
             )
 
-            events = list(coach_agent.rename_processed_inputs([result]))
+            events = list(workflow.rename_processed_inputs([result]))
             output = events[-1].output[0]
 
             self.assertTrue(source.exists())
@@ -643,19 +647,19 @@ class EnglishCoachAgentTest(unittest.TestCase):
             self.assertEqual(len(events), 1)
 
     def test_build_student_profiles_merges_writing_and_grammar_learning_needs(self):
-        writing_result = coach_agent.InputProcessingResult(
+        writing_result = schemas.InputProcessingResult(
             filename="Suzy_writing.png",
             category="writing",
             student_name="Suzy",
             feedback_language="en",
-            feedback=coach_agent.EnglishCoachFeedback(
+            feedback=schemas.EnglishCoachFeedback(
                 filename="Suzy_writing.png",
                 student_name="Suzy",
                 feedback_language="en",
                 prompt_summary="Write about AI.",
                 transcription="AI help me.",
                 overall_score=17.0,
-                dimensions=coach_agent.DimensionScores(
+                dimensions=schemas.DimensionScores(
                     content=4,
                     structure=4,
                     language=5.0,
@@ -666,7 +670,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             ),
             grammar_training=None,
             learning_needs=[
-                coach_agent.LearningNeed(
+                schemas.LearningNeed(
                     student_name="Suzy",
                     source_type="writing",
                     filename="Suzy_writing.png",
@@ -677,18 +681,18 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 )
             ],
         )
-        grammar_result = coach_agent.InputProcessingResult(
+        grammar_result = schemas.InputProcessingResult(
             filename="grammar.png",
             category="grammar_training",
             student_name="unknown",
             feedback_language="en",
             feedback=None,
-            grammar_training=coach_agent.GrammarTrainingEvidence(
+            grammar_training=schemas.GrammarTrainingEvidence(
                 student_name="unknown",
                 mistakes=[],
             ),
             learning_needs=[
-                coach_agent.LearningNeed(
+                schemas.LearningNeed(
                     student_name="unknown",
                     source_type="grammar_training",
                     filename="grammar.png",
@@ -700,7 +704,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
             ],
         )
 
-        profiles = coach_agent.build_student_profiles([writing_result, grammar_result])
+        profiles = workflow.build_student_profiles([writing_result, grammar_result])
 
         self.assertEqual(len(profiles), 1)
         self.assertEqual(profiles[0].student_name, "Suzy")
@@ -709,11 +713,11 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertEqual(len(profiles[0].grammar_trainings), 1)
 
     def test_write_report_writes_markdown_and_training_json(self):
-        profile = coach_agent.StudentLearningProfile(
+        profile = schemas.StudentLearningProfile(
             student_name="Eve",
             feedback_language="zh-Hans",
             feedback_items=[
-                coach_agent.EnglishCoachFeedback(
+                schemas.EnglishCoachFeedback(
                     filename="Eve_writing.png",
                     student_name="Eve",
                     feedback_language="zh-Hans",
@@ -724,7 +728,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                         " travel with my family."
                     ),
                     overall_score=16.5,
-                    dimensions=coach_agent.DimensionScores(
+                    dimensions=schemas.DimensionScores(
                         content=5,
                         structure=4,
                         language=3.5,
@@ -735,10 +739,10 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 )
             ],
             grammar_trainings=[
-                coach_agent.GrammarTrainingEvidence(
+                schemas.GrammarTrainingEvidence(
                     student_name="Eve",
                     mistakes=[
-                        coach_agent.GrammarTrainingMistake(
+                        schemas.GrammarTrainingMistake(
                             skill_tag="past_tense",
                             original_answer="I go yesterday.",
                             correct_answer="I went yesterday.",
@@ -748,7 +752,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
                 )
             ],
             learning_needs=[
-                coach_agent.LearningNeed(
+                schemas.LearningNeed(
                     student_name="Eve",
                     source_type="grammar_training",
                     filename="grammar.png",
@@ -761,13 +765,13 @@ class EnglishCoachAgentTest(unittest.TestCase):
             skipped=[],
         )
 
-        old_reports_dir = coach_agent.REPORTS_DIR
-        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
-        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
+        old_reports_dir = workflow.REPORTS_DIR
+        old_training_dir = workflow.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = workflow.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
-            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
-            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
+            workflow.REPORTS_DIR = Path(tmpdir) / "reports"
+            workflow.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            workflow.PDF_EXPORTS_DIR = workflow.REPORTS_DIR / "pdf_exports"
             try:
                 def fake_export(report_path, output_dir):
                     pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
@@ -776,23 +780,23 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     return pdf_path
 
                 with mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "export_report_pdf",
                     side_effect=fake_export,
                 ) as export_mock, mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "open_pdf_in_wps",
                 ) as open_mock:
-                    events = list(coach_agent.write_report([profile]))
-                report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
-                payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
-                pdf_path = next((coach_agent.REPORTS_DIR / "pdf_exports").glob("Eve_*.pdf"))
+                    events = list(workflow.write_report([profile]))
+                report = next(workflow.REPORTS_DIR.glob("Eve_*.md"))
+                payload_path = next(workflow.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
+                pdf_path = next((workflow.REPORTS_DIR / "pdf_exports").glob("Eve_*.pdf"))
                 report_text = report.read_text(encoding="utf-8")
                 payload = json.loads(payload_path.read_text(encoding="utf-8"))
             finally:
-                coach_agent.REPORTS_DIR = old_reports_dir
-                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
-                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
+                workflow.REPORTS_DIR = old_reports_dir
+                workflow.TRAINING_INPUTS_DIR = old_training_dir
+                workflow.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         self.assertEqual(len(events), 1)
         self.assertEqual(export_mock.call_count, 2)
@@ -826,8 +830,8 @@ class EnglishCoachAgentTest(unittest.TestCase):
         )
 
     def test_write_report_merges_session_pdf_per_session(self):
-        def make_profile(name: str) -> "coach_agent.StudentLearningProfile":
-            return coach_agent.StudentLearningProfile(
+        def make_profile(name: str) -> "schemas.StudentLearningProfile":
+            return schemas.StudentLearningProfile(
                 student_name=name,
                 feedback_language="zh-Hans",
                 feedback_items=[],
@@ -838,13 +842,13 @@ class EnglishCoachAgentTest(unittest.TestCase):
 
         profiles = [make_profile("Eve"), make_profile("Suzy")]
 
-        old_reports_dir = coach_agent.REPORTS_DIR
-        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
-        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
+        old_reports_dir = workflow.REPORTS_DIR
+        old_training_dir = workflow.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = workflow.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
-            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
-            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
+            workflow.REPORTS_DIR = Path(tmpdir) / "reports"
+            workflow.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            workflow.PDF_EXPORTS_DIR = workflow.REPORTS_DIR / "pdf_exports"
             try:
                 def fake_export(report_path, output_dir):
                     pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
@@ -853,23 +857,23 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     return pdf_path
 
                 with mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "export_report_pdf",
                     side_effect=fake_export,
                 ) as export_mock, mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "open_pdf_in_wps",
                 ) as open_mock:
-                    events = list(coach_agent.write_report(profiles))
-                session_md = next(coach_agent.REPORTS_DIR.glob("session_*.md"))
+                    events = list(workflow.write_report(profiles))
+                session_md = next(workflow.REPORTS_DIR.glob("session_*.md"))
                 session_pdf = next(
-                    (coach_agent.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
+                    (workflow.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
                 )
                 session_text = session_md.read_text(encoding="utf-8")
             finally:
-                coach_agent.REPORTS_DIR = old_reports_dir
-                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
-                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
+                workflow.REPORTS_DIR = old_reports_dir
+                workflow.TRAINING_INPUTS_DIR = old_training_dir
+                workflow.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         # One PDF per student plus a single combined session PDF.
         self.assertEqual(export_mock.call_count, 3)
@@ -889,7 +893,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertIn(f"/reports/{session_pdf.name}", message)
 
     def test_write_report_warns_when_pdf_export_fails(self):
-        profile = coach_agent.StudentLearningProfile(
+        profile = schemas.StudentLearningProfile(
             student_name="Eve",
             feedback_language="zh-Hans",
             feedback_items=[],
@@ -898,28 +902,28 @@ class EnglishCoachAgentTest(unittest.TestCase):
             skipped=[],
         )
 
-        old_reports_dir = coach_agent.REPORTS_DIR
-        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
-        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
+        old_reports_dir = workflow.REPORTS_DIR
+        old_training_dir = workflow.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = workflow.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
-            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
-            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
+            workflow.REPORTS_DIR = Path(tmpdir) / "reports"
+            workflow.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            workflow.PDF_EXPORTS_DIR = workflow.REPORTS_DIR / "pdf_exports"
             try:
                 with mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "export_report_pdf",
-                    side_effect=coach_agent.PdfExportError("pandoc missing"),
+                    side_effect=pdf_export.PdfExportError("pandoc missing"),
                 ):
-                    events = list(coach_agent.write_report([profile]))
-                report = next(coach_agent.REPORTS_DIR.glob("Eve_*.md"))
-                payload_path = next(coach_agent.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
+                    events = list(workflow.write_report([profile]))
+                report = next(workflow.REPORTS_DIR.glob("Eve_*.md"))
+                payload_path = next(workflow.TRAINING_INPUTS_DIR.glob("Eve_*.json"))
                 report_exists = report.is_file()
                 payload_exists = payload_path.is_file()
             finally:
-                coach_agent.REPORTS_DIR = old_reports_dir
-                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
-                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
+                workflow.REPORTS_DIR = old_reports_dir
+                workflow.TRAINING_INPUTS_DIR = old_training_dir
+                workflow.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         self.assertTrue(report_exists)
         self.assertTrue(payload_exists)
@@ -927,7 +931,7 @@ class EnglishCoachAgentTest(unittest.TestCase):
         self.assertIn("pandoc missing", events[0].message.parts[0].text)
 
     def test_write_report_warns_when_wps_open_fails(self):
-        profile = coach_agent.StudentLearningProfile(
+        profile = schemas.StudentLearningProfile(
             student_name="Eve",
             feedback_language="zh-Hans",
             feedback_items=[],
@@ -936,13 +940,13 @@ class EnglishCoachAgentTest(unittest.TestCase):
             skipped=[],
         )
 
-        old_reports_dir = coach_agent.REPORTS_DIR
-        old_training_dir = coach_agent.TRAINING_INPUTS_DIR
-        old_pdf_exports_dir = coach_agent.PDF_EXPORTS_DIR
+        old_reports_dir = workflow.REPORTS_DIR
+        old_training_dir = workflow.TRAINING_INPUTS_DIR
+        old_pdf_exports_dir = workflow.PDF_EXPORTS_DIR
         with tempfile.TemporaryDirectory() as tmpdir:
-            coach_agent.REPORTS_DIR = Path(tmpdir) / "reports"
-            coach_agent.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
-            coach_agent.PDF_EXPORTS_DIR = coach_agent.REPORTS_DIR / "pdf_exports"
+            workflow.REPORTS_DIR = Path(tmpdir) / "reports"
+            workflow.TRAINING_INPUTS_DIR = Path(tmpdir) / "training_inputs"
+            workflow.PDF_EXPORTS_DIR = workflow.REPORTS_DIR / "pdf_exports"
             try:
                 def fake_export(report_path, output_dir):
                     pdf_path = Path(output_dir) / f"{Path(report_path).stem}.pdf"
@@ -951,23 +955,23 @@ class EnglishCoachAgentTest(unittest.TestCase):
                     return pdf_path
 
                 with mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "export_report_pdf",
                     side_effect=fake_export,
                 ), mock.patch.object(
-                    coach_agent,
+                    workflow,
                     "open_pdf_in_wps",
-                    side_effect=coach_agent.PdfOpenError("WPS unavailable"),
+                    side_effect=pdf_export.PdfOpenError("WPS unavailable"),
                 ) as open_mock:
-                    events = list(coach_agent.write_report([profile]))
+                    events = list(workflow.write_report([profile]))
                 session_pdf = next(
-                    (coach_agent.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
+                    (workflow.REPORTS_DIR / "pdf_exports").glob("session_*.pdf")
                 )
                 session_pdf_exists = session_pdf.is_file()
             finally:
-                coach_agent.REPORTS_DIR = old_reports_dir
-                coach_agent.TRAINING_INPUTS_DIR = old_training_dir
-                coach_agent.PDF_EXPORTS_DIR = old_pdf_exports_dir
+                workflow.REPORTS_DIR = old_reports_dir
+                workflow.TRAINING_INPUTS_DIR = old_training_dir
+                workflow.PDF_EXPORTS_DIR = old_pdf_exports_dir
 
         open_mock.assert_called_once_with(session_pdf)
         self.assertTrue(session_pdf_exists)

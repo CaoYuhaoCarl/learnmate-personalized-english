@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import html
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -207,6 +209,7 @@ async def _process_one_input_result(
             feedback_language=feedback_language,
             task_description="Grade the writing submission by extracting evidence only.",
         )
+        original_evidence = evidence.model_copy(deep=True)
         student_name = utils.resolve_student_name(
             filename=filename,
             category_name=category.student_name,
@@ -223,6 +226,7 @@ async def _process_one_input_result(
         feedback = EnglishCoachFeedback(
             filename=filename,
             student_name=student_name,
+            submission_date=submission_date,
             feedback_language=feedback_language,
             prompt_summary=evidence.prompt_summary,
             transcription=evidence.transcription,
@@ -240,6 +244,8 @@ async def _process_one_input_result(
             submission_date=submission_date,
             feedback_language=feedback_language,
             feedback=feedback,
+            classification=category,
+            writing_evidence=original_evidence,
             learning_needs=utils.writing_learning_needs(
                 filename=filename,
                 student_name=student_name,
@@ -258,6 +264,7 @@ async def _process_one_input_result(
             feedback_language=feedback_language,
             task_description="Extract grammar-training mistakes from this image.",
         )
+        original_evidence = evidence.model_copy(deep=True)
         student_name = utils.resolve_student_name(
             filename=filename,
             category_name=category.student_name,
@@ -278,6 +285,8 @@ async def _process_one_input_result(
             submission_date=submission_date,
             feedback_language=feedback_language,
             grammar_training=evidence,
+            classification=category,
+            grammar_evidence=original_evidence,
             learning_needs=utils.grammar_learning_needs(
                 filename=filename,
                 student_name=student_name,
@@ -485,6 +494,8 @@ def rename_processed_inputs(
 
 def build_student_profiles(
     node_input: list[InputProcessingResult] | list[dict[str, object]],
+    *,
+    infer_unknown_student: bool = True,
 ) -> list[StudentLearningProfile]:
     """Aggregate processing results into per-student profiles."""
     results = _coerce_results(node_input)
@@ -498,7 +509,9 @@ def build_student_profiles(
     for result in results:
         student_name = result.student_name
         if not utils.known_name(student_name):
-            if len(known_students) == 1:
+            if not infer_unknown_student:
+                student_name = "unknown"
+            elif len(known_students) == 1:
                 student_name = known_students[0]
             else:
                 hint = utils.student_hint_from_filename(result.filename)
@@ -538,10 +551,27 @@ def _render_profile_markdown(
     *,
     display_ts: str,
     training_path: Path,
+    review_label: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Render one student profile as frontmatter and body lines."""
     student = profile.student_name or "unknown"
     lang = profile.feedback_language
+
+    def plain(value: object) -> str:
+        if review_label is None:
+            return str(value)
+        escaped = html.escape(str(value), quote=False)
+        escaped = re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", escaped)
+        return escaped.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+
+    def cell(value: object) -> str:
+        return plain(value) if review_label is not None else utils.markdown_cell(value)
+
+    def fence(value: str) -> str:
+        if review_label is None:
+            return "```"
+        longest = max((len(run) for run in re.findall(r"`+", value)), default=0)
+        return "`" * max(3, longest + 1)
 
     frontmatter_lines: list[str] = [
         "---",
@@ -562,6 +592,8 @@ def _render_profile_markdown(
         f"# {utils.i18n_report('title', lang)}",
         "",
     ]
+    if review_label is not None:
+        lines.extend([plain(review_label), "", f"学生：{plain(student)}", ""])
 
     # Only show Score Summary if there are multiple submissions
     if len(profile.feedback_items) > 1:
@@ -573,7 +605,7 @@ def _render_profile_markdown(
         for feedback in profile.feedback_items:
             d = feedback.dimensions
             lines.append(
-                f"| {utils.markdown_cell(feedback.filename)} | {feedback.overall_score:.1f}/20 |"
+                f"| {cell(feedback.filename)} | {feedback.overall_score:.1f}/20 |"
                 f" {d.content}/5 | {d.structure}/5 | {d.language:.1f}/5 |"
                 f" {d.handwriting}/5 |"
             )
@@ -585,8 +617,9 @@ def _render_profile_markdown(
             d = feedback.dimensions
             lines.extend([
                 "",
-                f"### {index}. {feedback.filename}",
+                f"### {index}. {plain(feedback.filename)}",
                 "",
+                *([f"提交日期：{plain(feedback.submission_date or '待核对')}", ""] if review_label is not None else []),
                 f"#### {utils.i18n_report('score_breakdown', lang)}",
                 "| Overall | Content | Structure | Language | Handwriting |",
                 "| ---: | ---: | ---: | ---: | ---: |",
@@ -596,51 +629,57 @@ def _render_profile_markdown(
                 ),
                 "",
                 f"#### {utils.i18n_report('prompt', lang)}",
-                feedback.prompt_summary,
+                plain(feedback.prompt_summary),
                 "",
                 f"#### {utils.i18n_report('strengths', lang)}",
             ])
             for strength in feedback.strengths:
-                lines.append(f"- {strength}")
+                lines.append(f"- {plain(strength)}")
             lines.append("")
             lines.append(f"#### {utils.i18n_report('improvements', lang)}")
             for improvement in feedback.improvements:
-                lines.append(f"- {improvement}")
+                lines.append(f"- {plain(improvement)}")
             lines.extend([
                 "",
                 f"#### {utils.i18n_report('original', lang)}",
-                "```text",
+                f"{fence(feedback.transcription)}text",
             ])
             lines.extend(feedback.transcription.splitlines() or [feedback.transcription])
-            lines.append("```")
+            lines.append(fence(feedback.transcription))
             model_essay = feedback.model_essay.strip()
             if model_essay:
                 lines.extend([
                     "",
                     f"#### {utils.i18n_report('model_essay', lang)}",
-                    "```text",
+                    f"{fence(model_essay)}text",
                 ])
                 lines.extend(model_essay.splitlines() or [model_essay])
-                lines.append("```")
+                lines.append(fence(model_essay))
             lines.append("")
 
+    date_heading = " 提交日期 |" if review_label is not None else ""
+    date_divider = " --- |" if review_label is not None else ""
     lines.extend([
         f"## {utils.i18n_report('grammar_training', lang)}",
-        f"| {utils.i18n_report('col_skill', lang)} | {utils.i18n_report('col_original', lang)} | {utils.i18n_report('col_correct', lang)} | {utils.i18n_report('col_explanation', lang)} |",
-        "| --- | --- | --- | --- |",
+        f"|{date_heading} {utils.i18n_report('col_skill', lang)} | {utils.i18n_report('col_original', lang)} | {utils.i18n_report('col_correct', lang)} | {utils.i18n_report('col_explanation', lang)} |",
+        f"|{date_divider} --- | --- | --- | --- |",
     ])
     grammar_rows = 0
     for training in profile.grammar_trainings:
+        if review_label is not None and not training.mistakes:
+            grammar_rows += 1
+            lines.append(f"| {cell(training.submission_date or '待核对')} | {utils.i18n_report('no_grammar_data', lang)} | | | |")
         for mistake in training.mistakes:
             grammar_rows += 1
+            date_cell = f" {cell(training.submission_date or '待核对')} |" if review_label is not None else ""
             lines.append(
-                f"| {utils.markdown_cell(mistake.skill_tag)} |"
-                f" {utils.markdown_cell(mistake.original_answer)} |"
-                f" {utils.markdown_cell(mistake.correct_answer)} |"
-                f" {utils.markdown_cell(mistake.explanation)} |"
+                f"|{date_cell} {cell(mistake.skill_tag)} |"
+                f" {cell(mistake.original_answer)} |"
+                f" {cell(mistake.correct_answer)} |"
+                f" {cell(mistake.explanation)} |"
             )
     if grammar_rows == 0:
-        lines.append(f"| {utils.i18n_report('no_grammar_data', lang)} | | | |")
+        lines.append(f"|{' |' if review_label is not None else ''} {utils.i18n_report('no_grammar_data', lang)} | | | |")
     lines.append("")
 
     lines.extend([
@@ -650,11 +689,11 @@ def _render_profile_markdown(
     ])
     for need in profile.learning_needs:
         lines.append(
-            f"| {utils.markdown_cell(need.source_type)} |"
-            f" {utils.markdown_cell(need.skill_tag)} |"
-            f" {utils.markdown_cell(need.evidence)} |"
-            f" {utils.markdown_cell(need.suggested_fix)} |"
-            f" {utils.markdown_cell(need.explanation)} |"
+            f"| {cell(need.source_type)} |"
+            f" {cell(need.skill_tag)} |"
+            f" {cell(need.evidence)} |"
+            f" {cell(need.suggested_fix)} |"
+            f" {cell(need.explanation)} |"
         )
     if not profile.learning_needs:
         lines.append(f"| {utils.i18n_report('no_training_needs', lang)} | | | | |")
@@ -662,15 +701,26 @@ def _render_profile_markdown(
     if profile.skipped:
         lines.extend(["", "## Skipped Images"])
         for skipped in profile.skipped:
-            lines.append(f"- {skipped}")
+            lines.append(f"- {plain(skipped)}")
 
     return frontmatter_lines, lines
 
 
 def write_report(
     node_input: list[StudentLearningProfile] | list[dict[str, object]],
+    *,
+    reports_dir: Path | None = None,
+    training_inputs_dir: Path | None = None,
+    pdf_exports_dir: Path | None = None,
+    open_in_wps: bool = True,
+    review_label: str | None = None,
 ):
-    """Write Markdown reports, JSON training inputs, and PDF exports."""
+    """Write reports, optionally into an isolated Web submission directory."""
+    reports_dir = REPORTS_DIR if reports_dir is None else reports_dir
+    training_inputs_dir = (
+        TRAINING_INPUTS_DIR if training_inputs_dir is None else training_inputs_dir
+    )
+    pdf_exports_dir = PDF_EXPORTS_DIR if pdf_exports_dir is None else pdf_exports_dir
     profiles = [
         StudentLearningProfile.model_validate(profile) for profile in node_input
     ]
@@ -681,20 +731,33 @@ def write_report(
     now = datetime.datetime.now().astimezone()
     file_ts = now.strftime("%Y-%m-%d_%H-%M-%S")
     display_ts = now.strftime("%Y-%m-%d %H:%M:%S")
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    TRAINING_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    training_inputs_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
     pdf_links: list[tuple[Path, str]] = []
     pdf_warnings: list[str] = []
     wps_warnings: list[str] = []
     session_sections: list[list[str]] = []
+    report_manifest: list[dict[str, str]] = []
 
-    for profile in profiles:
+    def available_stem(base_stem: str) -> str:
+        """Keep all three artifacts aligned without replacing an existing file."""
+        stem = base_stem
+        suffix = 2
+        while any((directory / f"{stem}{extension}").exists() for directory, extension in (
+            (reports_dir, ".md"), (training_inputs_dir, ".json"), (pdf_exports_dir, ".pdf"),
+        )):
+            stem = f"{base_stem}_{suffix}"
+            suffix += 1
+        return stem
+
+    for profile_index, profile in enumerate(profiles, start=1):
         student = profile.student_name or "unknown"
         safe_student = utils.safe_filename_segment(student)
-        report_path = REPORTS_DIR / f"{safe_student}_{file_ts}.md"
-        training_path = TRAINING_INPUTS_DIR / f"{safe_student}_{file_ts}.json"
+        report_stem = available_stem(f"{safe_student}_{file_ts}")
+        report_path = reports_dir / f"{report_stem}.md"
+        training_path = training_inputs_dir / f"{report_stem}.json"
         training_path.write_text(
             json.dumps(
                 profile.model_dump(mode="json"),
@@ -709,6 +772,7 @@ def write_report(
             profile,
             display_ts=display_ts,
             training_path=training_path,
+            review_label=review_label,
         )
 
         report_path.write_text(
@@ -718,12 +782,14 @@ def write_report(
         session_sections.append(body_lines)
 
         try:
-            pdf_path = export_report_pdf(report_path, output_dir=PDF_EXPORTS_DIR)
+            pdf_path = export_report_pdf(report_path, output_dir=pdf_exports_dir)
         except PdfExportError as exc:
             pdf_warnings.append(f"{report_path.name}: {exc}")
         else:
             written.append(pdf_path)
             pdf_links.append((pdf_path, f"/reports/{quote(pdf_path.name)}"))
+            report_manifest.append({"filename": pdf_path.name, "title": f"{student} · 学习反馈",
+                                    "report_key": f"student-{profile_index}"})
 
     if session_sections:
         session_body: list[str] = []
@@ -740,21 +806,23 @@ def write_report(
             "---",
             *session_body,
         ]
-        session_path = REPORTS_DIR / f"session_{file_ts}.md"
+        session_path = reports_dir / f"{available_stem(f'session_{file_ts}')}.md"
         session_path.write_text("\n".join(session_lines) + "\n", encoding="utf-8")
         written.append(session_path)
 
         try:
-            session_pdf = export_report_pdf(session_path, output_dir=PDF_EXPORTS_DIR)
+            session_pdf = export_report_pdf(session_path, output_dir=pdf_exports_dir)
         except PdfExportError as exc:
             pdf_warnings.append(f"{session_path.name}: {exc}")
         else:
             written.append(session_pdf)
             pdf_links.append((session_pdf, f"/reports/{quote(session_pdf.name)}"))
-            try:
-                open_pdf_in_wps(session_pdf)
-            except PdfOpenError as exc:
-                wps_warnings.append(f"{session_pdf.name}: {exc}")
+            report_manifest.append({"filename": session_pdf.name, "title": "本次作业汇总", "report_key": "session"})
+            if open_in_wps:
+                try:
+                    open_pdf_in_wps(session_pdf)
+                except PdfOpenError as exc:
+                    wps_warnings.append(f"{session_pdf.name}: {exc}")
 
     summary = f"Wrote {len(written)} file(s):\n" + "\n".join(
         f"- {path}" for path in written
@@ -774,7 +842,11 @@ def write_report(
         summary += "\n\nWPS open warning(s):\n" + "\n".join(
             f"- {warning}" for warning in wps_warnings
         )
-    yield Event(message=summary)
+    yield Event(
+        message=summary,
+        output={"reports": report_manifest, "pdf_failures": len(pdf_warnings),
+                "expected_report_count": len(profiles) + 1},
+    )
 
 
 # ============================================================================
