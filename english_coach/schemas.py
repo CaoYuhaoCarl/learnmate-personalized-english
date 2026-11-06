@@ -47,10 +47,10 @@ class ImageCategory(BaseModel):
 
 class DimensionScores(BaseModel):
     """Multi-dimensional scoring for writing submissions."""
-    content: int
-    structure: int
+    content: float
+    structure: float
     language: float
-    handwriting: int
+    handwriting: float
 
 
 class WritingIssueFix(BaseModel):
@@ -124,6 +124,7 @@ class EnglishCoachFeedback(BaseModel):
     """Teacher-facing feedback for one writing submission."""
     filename: str
     student_name: str
+    submission_date: str = ""
     feedback_language: FeedbackLanguage = "zh-Hans"
     prompt_summary: str
     transcription: str
@@ -155,6 +156,10 @@ class InputProcessingResult(BaseModel):
     feedback_language: FeedbackLanguage = "zh-Hans"
     feedback: EnglishCoachFeedback | None = None
     grammar_training: GrammarTrainingEvidence | None = None
+    # Preserve model evidence before name/date resolution and derived scoring.
+    classification: ImageCategory | None = None
+    writing_evidence: WritingEvidence | None = None
+    grammar_evidence: GrammarTrainingEvidence | None = None
     learning_needs: list[LearningNeed] = Field(default_factory=list)
     skipped_reason: str | None = None
 
